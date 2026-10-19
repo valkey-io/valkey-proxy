@@ -1,5 +1,41 @@
 #include "proxy.h"
 
+/* ── pool stats (read by PROXY POOLS, see src/metrics.c) ────────────── */
+/* Only the owning worker writes a pool's stats, so a relaxed load + store
+ * is enough -- no locked read-modify-write on the hot path. */
+static inline void stat_add(atomic_ullong *s, unsigned long long n) {
+    atomic_store_explicit(s, atomic_load_explicit(s, memory_order_relaxed) + n, memory_order_relaxed);
+}
+
+static inline void stat_max(atomic_ullong *s, unsigned long long v) {
+    if (v > atomic_load_explicit(s, memory_order_relaxed)) atomic_store_explicit(s, v, memory_order_relaxed);
+}
+
+/* Every CONN_AVAILABLE <-> CONN_IN_USE transition goes through here, so
+ * p->in_use stays exact without rescanning p->conns. */
+static void conn_set_state(ConnPool *p, PoolConn *c, ConnState state) {
+    if (c->state == state) return;
+    p->in_use += (state == CONN_IN_USE) ? 1 : -1;
+    c->state = state;
+}
+
+/* Re-publish the gauges after anything that changes p->count, p->in_use or
+ * p->wait_len. */
+static void pool_stats_publish(ConnPool *p) {
+    atomic_store_explicit(&p->stats.open, p->count, memory_order_relaxed);
+    atomic_store_explicit(&p->stats.in_use, p->in_use, memory_order_relaxed);
+    atomic_store_explicit(&p->stats.waiting, p->wait_len, memory_order_relaxed);
+}
+
+/* A parked client was just handed a connection: record how long it waited. */
+static void pool_stats_handoff(ConnPool *p, ClientConn *client) {
+    uint64_t waited = mono_us() - client->wait_since_us;
+    stat_add(&p->stats.acquires, 1);
+    stat_add(&p->stats.handoffs, 1);
+    stat_add(&p->stats.wait_us_sum, waited);
+    stat_max(&p->stats.wait_us_max, waited);
+}
+
 /* ── connection pool ────────────────────────────────────────────────── */
 static int send_select(int fd, int db) {
     char cmd[64];
@@ -20,11 +56,16 @@ static int pool_new_fd(Worker *w, ConnPool *p) {
      * released) would otherwise stall every client this worker is serving,
      * not just the one triggering the (re)connect. */
     int fd = tcp_connect_timeout(node->ip, node->port, g_config.backend_connect_timeout_ms);
-    if (fd < 0) return -1;
-    if (p->db != 0 && send_select(fd, p->db) < 0) {
-        close(fd);
+    if (fd < 0) {
+        stat_add(&p->stats.connect_failures, 1);
         return -1;
     }
+    if (p->db != 0 && send_select(fd, p->db) < 0) {
+        close(fd);
+        stat_add(&p->stats.connect_failures, 1);
+        return -1;
+    }
+    stat_add(&p->stats.connects, 1);
     set_nonblocking(fd);
     if (fd < g_config.max_connection) w->backend_map[fd] = NULL;
     fd_watch(w, fd, EL_READABLE);
@@ -87,21 +128,24 @@ static void pool_fill_to(Worker *w, ConnPool *p, int want) {
             ClientConn *next = p->wait_queue[0];
             memmove(p->wait_queue, p->wait_queue + 1, (size_t)(p->wait_len - 1) * sizeof(ClientConn *));
             p->wait_len--;
-            c->state = CONN_IN_USE;
+            conn_set_state(p, c, CONN_IN_USE);
             c->waiting_client = next;
             c->epoch++;
             next->pending_conn = c;
             printf("        [%d] fd=%-4d  %s:%d  db=%d  → reassigned to client-fd=%d  (queue=%d)\n", p->count - 1, fd,
                    node->ip, node->port, p->db, next->fd, p->wait_len);
+            pool_stats_handoff(p, next);
             resume_client_after_conn(w, next, c);
         }
     }
+    pool_stats_publish(p);
 }
 
 void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db) {
     p->type = type;
     p->max = g_pool_max[type];
     p->count = 0;
+    p->in_use = 0;
     p->conns = NULL;
     p->node_idx = node_idx;
     p->db = db;
@@ -110,6 +154,10 @@ void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db) {
     p->wait_len = 0;
     p->wait_cap = 0;
     pthread_mutex_init(&p->lock, NULL);
+    /* p->stats needs no reset: pool_init() only ever runs on a NodePools
+     * fresh from db_group_create()'s calloc (gen == -1), so it's still all
+     * zeroes. Counters then keep counting across later topology changes. */
+    atomic_store_explicit(&p->stats.live, 1, memory_order_release);
     int want = g_pool_min[type];
     if (want == 0) {
         printf("      %-14s pool:  0/%d (on-demand)\n", POOL_NAME[type], p->max);
@@ -124,8 +172,10 @@ void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db) {
 PoolConn *pool_acquire_nb(Worker *w, ConnPool *p) {
     for (int i = 0; i < p->count; i++) {
         if (p->conns[i].state == CONN_AVAILABLE) {
-            p->conns[i].state = CONN_IN_USE;
+            conn_set_state(p, &p->conns[i], CONN_IN_USE);
             p->conns[i].epoch++;
+            stat_add(&p->stats.acquires, 1);
+            pool_stats_publish(p);
             return &p->conns[i];
         }
     }
@@ -139,7 +189,7 @@ PoolConn *pool_acquire_nb(Worker *w, ConnPool *p) {
             const ClusterNode *node = &w->topo.nodes[p->node_idx];
             PoolConn *c = &p->conns[p->count];
             c->fd = fd;
-            c->state = CONN_IN_USE;
+            conn_set_state(p, c, CONN_IN_USE); /* fresh slot, so this counts it */
             c->db = p->db;
             c->pool = p;
             c->waiting_client = NULL;
@@ -156,6 +206,8 @@ PoolConn *pool_acquire_nb(Worker *w, ConnPool *p) {
             printf("  [%s pool] node [%s:%d] db=%d: new conn fd=%d (%d/%d)\n", POOL_NAME[p->type], node->ip, node->port,
                    p->db, fd, p->count + 1, p->max);
             p->count++;
+            stat_add(&p->stats.acquires, 1);
+            pool_stats_publish(p);
             return c;
         }
     }
@@ -172,6 +224,9 @@ void pool_enqueue_waiter(ConnPool *p, ClientConn *client) {
     }
     p->wait_queue[p->wait_len++] = client;
     client->waiting_pool = p;
+    client->wait_since_us = mono_us();
+    stat_add(&p->stats.waits, 1);
+    pool_stats_publish(p);
 }
 
 void pool_remove_waiter(ConnPool *p, ClientConn *client) {
@@ -179,6 +234,8 @@ void pool_remove_waiter(ConnPool *p, ClientConn *client) {
         if (p->wait_queue[i] == client) {
             memmove(&p->wait_queue[i], &p->wait_queue[i + 1], (size_t)(p->wait_len - i - 1) * sizeof(ClientConn *));
             p->wait_len--;
+            stat_add(&p->stats.wait_abandoned, 1);
+            pool_stats_publish(p);
             return;
         }
     }
@@ -202,7 +259,9 @@ static void pool_fail_all_waiters(Worker *w, ConnPool *p, const char *msg) {
         client->state = CS_READING_HDR;
         fd_watch(w, client->fd, EL_READABLE);
     }
+    stat_add(&p->stats.wait_failed, (unsigned long long)p->wait_len);
     p->wait_len = 0;
+    pool_stats_publish(p);
 }
 
 /* Close conn's current fd, open a fresh one against p's node_idx (using the
@@ -252,6 +311,8 @@ static int pool_reconnect_conn_or_destroy(Worker *w, PoolConn *c) {
     const ClusterNode *node = &w->topo.nodes[p->node_idx];
     printf("[worker %d] [pool:%s] reconnected fd=%-4d node=%s:%d (topology change, was fd=%d)\n", w->thread_id,
            POOL_NAME[p->type], newfd, node->ip, node->port, old_fd);
+    stat_add(&p->stats.reconnects, 1);
+    stat_add(&p->stats.destroys, 1); /* old_fd, closed above */
     return 0;
 }
 
@@ -277,15 +338,16 @@ void pool_release(Worker *w, PoolConn *c) {
         c->waiting_client = next;
         c->epoch++;
         next->pending_conn = c;
+        pool_stats_handoff(p, next);
+        pool_stats_publish(p);
         resume_client_after_conn(w, next, c);
     } else {
-        c->state = CONN_AVAILABLE;
+        conn_set_state(p, c, CONN_AVAILABLE);
         c->waiting_client = NULL;
-        int avail = 0;
-        for (int i = 0; i < p->count; i++)
-            if (p->conns[i].state == CONN_AVAILABLE) avail++;
+        int avail = p->count - p->in_use;
         printf("[worker %d] [pool:%s] release  fd=%-4d  node=%s:%d  db=%d  → available=%d  max=%d  waiting=%d\n",
                w->thread_id, POOL_NAME[p->type], c->fd, nd->ip, nd->port, c->db, avail, p->max, p->wait_len);
+        pool_stats_publish(p);
     }
 }
 
@@ -310,6 +372,7 @@ void pool_destroy_conn(Worker *w, PoolConn *c) {
     free(c->resp3_deferred_cmd);
     c->resp3_deferred_cmd = NULL;
 
+    if (c->state == CONN_IN_USE) p->in_use--;
     int idx = (int)(c - p->conns);
     p->count--;
     if (idx < p->count) {
@@ -343,34 +406,42 @@ void pool_destroy_conn(Worker *w, PoolConn *c) {
         if (moved->fanout_sub) moved->fanout_sub->conn = moved;
     }
     memset(&p->conns[p->count], 0, sizeof(PoolConn));
+    stat_add(&p->stats.destroys, 1);
+    pool_stats_publish(p);
 }
 
 /* ── db group ───────────────────────────────────────────────────────── */
+/* db_lock only guards the db_groups array itself (its realloc and
+ * db_group_count) against PROXY POOLS reading it from another worker, so it
+ * is never held across the blocking backend connects below. Only the owning
+ * worker ever adds to its own db_groups, so building the new group's pools
+ * outside the lock can't race with another creator. */
 static DbGroup *db_group_create(Worker *w, int db) {
+    pthread_mutex_lock(&w->db_lock);
     if (w->db_group_count == w->db_group_cap) {
         int nc = w->db_group_cap ? w->db_group_cap * 2 : 4;
         DbGroup *tmp = realloc(w->db_groups, (size_t)nc * sizeof(DbGroup));
         if (!tmp) {
+            pthread_mutex_unlock(&w->db_lock);
             perror("realloc");
             return NULL;
         }
         w->db_groups = tmp;
         w->db_group_cap = nc;
     }
-    DbGroup *g = &w->db_groups[w->db_group_count];
-    g->db = db;
+    pthread_mutex_unlock(&w->db_lock);
     /* Fixed at MAX_NODES regardless of the node count seen at creation time,
      * so a shard discovered by a later worker_sync_topology() has a slot
      * ready to use instead of running off the end of this array. */
-    g->node_pools = calloc(MAX_NODES, sizeof(NodePools));
-    if (!g->node_pools) {
+    NodePools *node_pools = calloc(MAX_NODES, sizeof(NodePools));
+    if (!node_pools) {
         perror("calloc");
         return NULL;
     }
     printf("  [worker %d] creating db%d group (%d node(s))\n", w->thread_id, db, w->topo.node_count);
     int total = 0;
     for (int ni = 0; ni < MAX_NODES; ni++) {
-        NodePools *np = &g->node_pools[ni];
+        NodePools *np = &node_pools[ni];
         if (ni >= w->topo.node_count) {
             np->node_idx = -1;
             np->gen = -1;
@@ -385,7 +456,13 @@ static DbGroup *db_group_create(Worker *w, int db) {
         np->gen = w->topo.node_gen[ni];
     }
     printf("  [worker %d] db%d ready — %d connections established\n\n", w->thread_id, db, total);
+    /* Capacity was reserved above, and only this worker appends. */
+    pthread_mutex_lock(&w->db_lock);
+    DbGroup *g = &w->db_groups[w->db_group_count];
+    g->db = db;
+    g->node_pools = node_pools;
     w->db_group_count++;
+    pthread_mutex_unlock(&w->db_lock);
     return g;
 }
 
@@ -396,9 +473,8 @@ DbGroup *db_group_get(Worker *w, int db) {
             pthread_mutex_unlock(&w->db_lock);
             return &w->db_groups[i];
         }
-    DbGroup *g = db_group_create(w, db);
     pthread_mutex_unlock(&w->db_lock);
-    return g;
+    return db_group_create(w, db);
 }
 
 /* ── topology sync ──────────────────────────────────────────────────── */

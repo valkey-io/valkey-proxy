@@ -71,6 +71,14 @@ static char *send_big_set(int fd, const char *key, size_t len, char *out, int ou
     return resp_next_str(fd, out, outsz);
 }
 
+/* Sum every "<field><number>" occurrence in a PROXY POOLS reply. */
+static unsigned long long sum_pool_field(const char *s, const char *field) {
+    unsigned long long total = 0;
+    size_t fl = strlen(field);
+    for (const char *p = strstr(s, field); p; p = strstr(p + fl, field)) total += strtoull(p + fl, NULL, 10);
+    return total;
+}
+
 void run_general_tests(const char *host, int port, int *pass, int *fail) {
     printf("\n=== General Tests ===\n");
 
@@ -1063,6 +1071,29 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:gn:del:k3");
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:cs:foo");
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:cs:bar");
+
+    /* ── PROXY POOLS / PROXY HELP (answered by the proxy itself) ─────── */
+    /* ~330 bytes per pool line, 5 lines per node: 1MB covers well over 500 nodes. */
+    const int pools_cap = 1 << 20;
+    char *pools = malloc((size_t)pools_cap);
+    int plen = pools ? resp_send_raw_reply(fd, pools, pools_cap, 2, "PROXY", "POOLS") : -1;
+    CHECK(plen > 0 && pools[0] == '$' && strstr(pools, "# Pools"),
+          "PROXY POOLS: returns a bulk string with a Pools section", pass, fail);
+    CHECK(plen > 0 && strstr(pools, "_normal:addr=") && strstr(pools, ",open="),
+          "PROXY POOLS: reports the normal pool of each node", pass, fail);
+    unsigned long long acq_before = plen > 0 ? sum_pool_field(pools, "acquires=") : 0;
+    proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:gn:pools", "v");
+    proxy_cmd(fd, r, sizeof(r), 2, "GET", "tc:gn:pools");
+    proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:gn:pools");
+    plen = pools ? resp_send_raw_reply(fd, pools, pools_cap, 2, "PROXY", "POOLS") : -1;
+    CHECK(plen > 0 && sum_pool_field(pools, "acquires=") >= acq_before + 3,
+          "PROXY POOLS: acquires grows by at least 3 after SET/GET/DEL", pass, fail);
+
+    plen = pools ? resp_send_raw_reply(fd, pools, pools_cap, 2, "PROXY", "HELP") : -1;
+    CHECK(plen > 0 && pools[0] == '*' && strstr(pools, "POOLS"), "PROXY HELP: lists the POOLS subcommand", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "PROXY", "NOSUCH");
+    CHECK(strstr(r, "unknown PROXY subcommand") != NULL, "PROXY NOSUCH: unknown subcommand error", pass, fail);
+    free(pools);
 
     for (int i = 0; i < _ntr; i++) printf("  [%s] %s\n", _tr[i].ok ? "PASS" : "FAIL", _tr[i].label);
 

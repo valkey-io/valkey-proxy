@@ -350,6 +350,8 @@ The list below covers every supported command.
 | `MEMORY USAGE` | |
 | `MODULE LIST` | Forwarded to one primary node |
 | `MONITOR` | Planned |
+| `PROXY HELP` | Answered by proxy |
+| `PROXY POOLS` | Answered by proxy; connection pool usage per backend node and pool type |
 | `SLOWLOG GET` | Broadcast to every primary node |
 | `SLOWLOG HELP` | Forwarded to one primary node |
 | `SLOWLOG LEN` | Broadcast to every primary node |

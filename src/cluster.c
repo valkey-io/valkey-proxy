@@ -263,9 +263,7 @@ static int owner_idx_seeded = 0;
  * momentarily full (a wake is already pending for it) is simply skipped --
  * either way it will still pick up the new topology, just not instantly. */
 static void wake_all_workers(void) {
-    int nw = g_config.worker_thread_no;
-    if (nw < 1) nw = 1;
-    if (nw > MAX_WORKERS) nw = MAX_WORKERS;
+    int nw = g_config.worker_thread_no; /* clamped to [1, MAX_WORKERS] by parse_conf() */
     for (int i = 0; i < nw; i++) {
         int fd = g_workers[i].wake_w;
         if (fd < 0) continue;

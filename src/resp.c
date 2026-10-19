@@ -125,11 +125,6 @@ int resp_response_len(const char *buf, int len) {
  * marker can reveal at all (WITHSCORES/WITHVALUES-family, XREAD/XREADGROUP)
  * -- those need the separate, command-name-driven resp3_flatten_pairs()/
  * resp3_nest_pairs() fixups below, applied *after* this generic pass. */
-typedef struct {
-    char *buf;
-    int len, cap;
-} GrowBuf;
-
 static int gb_ensure(GrowBuf *g, int need) {
     if (g->cap - g->len >= need) return 0;
     int nc = g->cap ? g->cap * 2 : 256;
@@ -140,28 +135,30 @@ static int gb_ensure(GrowBuf *g, int need) {
     g->cap = nc;
     return 0;
 }
-static int gb_append(GrowBuf *g, const char *data, int len) {
+int gb_append(GrowBuf *g, const char *data, int len) {
     if (gb_ensure(g, len) < 0) return -1;
     memcpy(g->buf + g->len, data, (size_t)len);
     g->len += len;
     return 0;
 }
-static int gb_append_fmt(GrowBuf *g, const char *fmt, ...) {
-    char tmp[64];
+/* Formats straight into g's spare capacity; only when that's too small does
+ * it grow the buffer and format a second time. */
+int gb_append_fmt(GrowBuf *g, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    int n = g->buf ? vsnprintf(g->buf + g->len, (size_t)(g->cap - g->len), fmt, ap) : vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     if (n < 0) return -1;
-    if (n < (int)sizeof(tmp)) return gb_append(g, tmp, n);
-    char *big = malloc((size_t)n + 1);
-    if (!big) return -1;
+    if (g->buf && n < g->cap - g->len) {
+        g->len += n;
+        return 0;
+    }
+    if (gb_ensure(g, n + 1) < 0) return -1; /* +1: vsnprintf's NUL */
     va_start(ap, fmt);
-    vsnprintf(big, (size_t)n + 1, fmt, ap);
+    vsnprintf(g->buf + g->len, (size_t)(g->cap - g->len), fmt, ap);
     va_end(ap);
-    int rc = gb_append(g, big, n);
-    free(big);
-    return rc;
+    g->len += n;
+    return 0;
 }
 
 /* Converts one complete RESP element at buf[0..len) into its RESP2

@@ -3111,7 +3111,7 @@ void handle_function_cmd(Worker *w, ClientConn *client, int cmdlen) {
     client->hbuf_len = 0;
 }
 
-static void send_bulk_reply(Worker *w, ClientConn *client, const char *data, int len) {
+void send_bulk_reply(Worker *w, ClientConn *client, const char *data, int len) {
     char hdr[32];
     int hdr_len = snprintf(hdr, sizeof(hdr), "$%d\r\n", len);
     int reply_len = hdr_len + len + 2;
@@ -3358,6 +3358,10 @@ void handle_nokey_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen
     }
     if (!strcmp(cmd, "HELLO")) {
         handle_hello_cmd(w, client, cmdlen);
+        return;
+    }
+    if (!strcmp(cmd, "PROXY")) {
+        handle_proxy_cmd(w, client, cmdlen);
         return;
     }
     if (!strcmp(cmd, "PING")) {

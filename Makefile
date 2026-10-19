@@ -12,7 +12,7 @@ endif
 POOL_TARGET = valkey-proxy
 POOL_SRCS   = src/valkey-proxy.c src/config.c src/cluster.c src/resp.c \
               src/pool.c src/cmd.c src/fanout.c src/pubsub.c src/acl.c src/client.c \
-              src/hello.c src/event_loop.c
+              src/hello.c src/event_loop.c src/metrics.c
 BUILD_DIR   = build
 POOL_OBJS   = $(POOL_SRCS:%.c=$(BUILD_DIR)/%.o)
 
