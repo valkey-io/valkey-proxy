@@ -26,7 +26,7 @@ The list below covers every supported command.
 | `CLIENT LIST` | Planned |
 | `CLIENT SETNAME` | Stored on the proxy only, never sent to a backend |
 | `ECHO` | Answered by proxy |
-| `HELLO` | |
+| `HELLO` | Answered by proxy; reports `mode` `standalone` |
 | `PING` | Answered by proxy |
 | `RESET` | Planned |
 
@@ -345,11 +345,14 @@ The list below covers every supported command.
 | `DBSIZE` | Broadcast to every primary node |
 | `FLUSHALL` | Broadcast to every primary node |
 | `FLUSHDB` | Broadcast to every primary node |
-| `INFO` | Planned |
+| `INFO` | Answered as one standalone server: proxy sections answered locally, keyspace summed across primaries, other backend sections listed per shard; see FEATURES.md §3.4 |
 | `LOLWUT` | Forwarded to one primary node |
 | `MEMORY USAGE` | |
 | `MODULE LIST` | Forwarded to one primary node |
 | `MONITOR` | Planned |
+| `PROXY HELP` | Answered by proxy |
+| `PROXY INFO` | Each primary's own INFO reply, unmerged; `SHARD <idx>\|<ip:port>` limits it to one |
+| `PROXY POOLS` | Answered by proxy; connection pool usage per backend node and pool type |
 | `SLOWLOG GET` | Broadcast to every primary node |
 | `SLOWLOG HELP` | Forwarded to one primary node |
 | `SLOWLOG LEN` | Broadcast to every primary node |

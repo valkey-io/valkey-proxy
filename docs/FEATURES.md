@@ -67,6 +67,50 @@ treatment as `SCRIPT FLUSH` — always `ASYNC`, always `+OK`), `FUNCTION DELETE`
 every node succeeds), `FUNCTION LOAD` (succeeds only if every node succeeds), `FUNCTION STATS`
 (each node's execution state is reported separately, not merged).
 
+### 3.4 INFO and PROXY introspection
+
+`INFO` describes the proxy as one standalone server instead of relaying a single shard's reply.
+Each section comes from one of three sources:
+
+| Section | Source |
+|---|---|
+| `server` | Proxy. `redis_version`/`valkey_version` are the lowest seen across the shards (probed at startup and after each topology change); `server_mode:standalone`; uptime, `process_id`, `run_id`, `tcp_port`, `executable`, `config_file` and listeners are the proxy's own; adds `proxy_version` |
+| `tls` | Proxy. Serial and seconds to expiry of the proxy's server certificate; the client and CA fields stay `none`/`0` |
+| `clients` | Proxy. `connected_clients` across all workers, `maxclients` = `max_connection` |
+| `cluster` | Proxy. Always `cluster_enabled:0` |
+| `keyspace` | Every master, summed per db (`avg_ttl` weighted by `expires`), so it agrees with `DBSIZE` |
+| `memory` `persistence` `stats` `commandstats` `errorstats` `latencystats` | Every master, listed per shard without merging |
+| `proxy` | Proxy. Workers, topology version, shard count, unmapped slots, and how many shards answered this reply (`info_shards_queried`/`_ok`/`_failed`) |
+| `pools` | Proxy. Same as `PROXY POOLS` |
+
+In a per-shard section each shard starts with `shard<idx>:addr=<ip>:<port>,node_id=<id>,status=ok|error`
+and its own lines follow prefixed with `shard<idx>_` (e.g. `shard0_used_memory:...`), so the reply
+stays a flat `key:value` list. `<idx>` is the shard's index in the proxy's topology, the same one
+`PROXY POOLS` and `PROXY INFO ... SHARD` use.
+
+`INFO` / `INFO default`: server, clients, cluster, keyspace, proxy. `INFO all`: adds tls, memory,
+persistence, stats, commandstats, errorstats, latencystats. `INFO everything`: adds pools. Section
+names are case-insensitive and can be combined (`INFO server keyspace`); output follows the order
+above. Unknown names are ignored, and a reply with no known section is empty, as in Valkey. Requests
+that only name proxy-answered sections never contact a backend. A RESP3 client gets a verbatim
+string, as from Valkey.
+
+`HELLO` reports `mode` `standalone` and the same version as `INFO`.
+
+`PROXY INFO [section ...] [SHARD <idx>|<ip:port>]` sends `INFO [section ...]` to every master (or
+just the given one) and returns each reply unmerged: an array of label/reply pairs (a map for a
+RESP3 client), labelled `<idx>:<ip>:<port>`. A shard that can't be reached gets an error entry.
+
+`PROXY POOLS` returns a bulk string in INFO's `key:value` format: a `# Pools` header, `workers:<n>`,
+then one `pool_db<db>_n<node>_<type>` line per backend node and pool type (`normal`, `blocking`,
+`subscription`, `transaction`, `acl`), summed across worker threads. Each line carries the node's
+`addr`, `gen` and `has_slots` (from the answering worker's topology snapshot), `max` (summed over the
+workers that have this pool), the gauges `open`, `in_use` and `waiting`, and the counters
+`acquires` (every connection handed out, including after a wait), `waits`, `handoffs`,
+`wait_us_sum`, `wait_us_max`, `wait_abandoned`, `wait_failed`, `connects`, `connect_failures`,
+`reconnects` and `destroys`. Counters are never reset; they keep counting when a node index is
+reassigned after a failover, which `gen` makes visible.
+
 ## 4. Blocking commands
 
 Blocking commands use a separate `POOL_BLOCKING` connection pool (long-lived, kept in blocking

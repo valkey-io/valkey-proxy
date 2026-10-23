@@ -77,6 +77,11 @@ void parse_conf(const char *path) {
                 g_config.max_connection, DEFAULT_MAX_CONNECTIONS);
         g_config.max_connection = DEFAULT_MAX_CONNECTIONS;
     }
+    /* Clamp here, before any thread starts, so everything that walks
+     * g_workers (main(), the refresh thread, PROXY POOLS) agrees on how many
+     * workers there are. */
+    if (g_config.worker_thread_no < 1) g_config.worker_thread_no = 1;
+    if (g_config.worker_thread_no > MAX_WORKERS) g_config.worker_thread_no = MAX_WORKERS;
 }
 
 /* ── TCP / Unix helpers ─────────────────────────────────────────────── */

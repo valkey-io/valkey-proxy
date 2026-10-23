@@ -140,6 +140,7 @@ static void do_accept(Worker *w, int listen_fd) {
             printf("[worker %d] client connected: unix socket  fd=%d\n", w->thread_id, fd);
         }
         w->client_map[fd] = client;
+        atomic_fetch_add_explicit(&w->client_count, 1, memory_order_relaxed);
         fd_watch(w, fd, EL_READABLE);
     }
 }
@@ -159,6 +160,7 @@ static void *worker_thread(void *arg) {
         return NULL;
     }
     pthread_mutex_init(&w->db_lock, NULL);
+    atomic_store_explicit(&w->stats_ready, 1, memory_order_release);
     if (!w->el) {
         fprintf(stderr, "el_create failed\n");
         return NULL;
@@ -258,6 +260,7 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     parse_conf(conf_path);
+    info_init(argv[0], conf_path);
     adjust_open_files_limit();
 
     memset(g_slot_map, -1, sizeof(g_slot_map));
@@ -296,9 +299,7 @@ int main(int argc, char **argv) {
     }
     printf("\n");
 
-    int nw = g_config.worker_thread_no;
-    if (nw < 1) nw = 1;
-    if (nw > MAX_WORKERS) nw = MAX_WORKERS;
+    int nw = g_config.worker_thread_no; /* clamped to [1, MAX_WORKERS] by parse_conf() */
     printf("Starting %d worker thread(s)...\n\n", nw);
 
     for (int i = 0; i < nw; i++) {

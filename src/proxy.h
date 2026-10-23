@@ -24,8 +24,9 @@
 #endif
 
 /* ── constants ──────────────────────────────────────────────────────── */
-#define MAX_NODES   64
-#define MAX_WORKERS 64
+#define MAX_NODES     64
+#define MAX_WORKERS   64
+#define PROXY_VERSION "0.1.0"
 /* Fallback for the "max_connection" proxy.conf setting (g_config.max_connection)
  * when the config file doesn't set it. This is the shared fd budget for the
  * whole process: client sockets + backend pool connections + listener(s). */
@@ -141,15 +142,39 @@ typedef struct {
     int discard_on_release;
 } PoolConn;
 
+/* Usage counters for one ConnPool, reported by PROXY POOLS (see
+ * src/metrics.c). Only the owning worker thread ever writes them, so pool.c
+ * updates them with plain relaxed load/store pairs rather than atomic
+ * read-modify-writes; the atomics only exist so another worker can read
+ * them mid-update without a data race. open/in_use/waiting are gauges,
+ * re-published after every change to the pool; the rest only ever grow. */
+typedef struct {
+    atomic_int live; /* 1 once pool_init() has run for this pool */
+    atomic_int open, in_use, waiting;
+    atomic_ullong acquires;         /* connection handed out, immediately or after a wait */
+    atomic_ullong waits;            /* client parked in wait_queue */
+    atomic_ullong handoffs;         /* parked client handed a connection (also in acquires) */
+    atomic_ullong wait_us_sum;      /* total time parked clients waited */
+    atomic_ullong wait_us_max;      /* longest single wait */
+    atomic_ullong wait_abandoned;   /* parked client disconnected */
+    atomic_ullong wait_failed;      /* parked client failed: node gone */
+    atomic_ullong connects;         /* backend connections opened */
+    atomic_ullong connect_failures; /* backend connect (or SELECT) failed */
+    atomic_ullong reconnects;       /* reconnected after a topology change */
+    atomic_ullong destroys;         /* backend connections closed, incl. a reconnect's old one */
+} PoolStats;
+
 struct ConnPool {
     PoolType type;
     PoolConn *conns;
     int count, max;
+    int in_use; /* conns in CONN_IN_USE, kept exact by conn_set_state() */
     int node_idx, db;
     EventLoop *el;
     pthread_mutex_t lock;
     ClientConn **wait_queue;
     int wait_len, wait_cap;
+    PoolStats stats;
 };
 
 /* gen mirrors the owning Worker's topo.node_gen[node_idx] as of the last time
@@ -177,6 +202,7 @@ struct ClientConn {
     long long cmd_remaining;
     PoolConn *pending_conn;
     ConnPool *waiting_pool;
+    uint64_t wait_since_us; /* mono_us() when last parked in a wait_queue */
     char *wbuf;
     int wbuf_len, wbuf_off, wbuf_cap;
     char *pbuf;
@@ -253,6 +279,7 @@ struct FanoutCtx {
     int sub_for_node[MAX_NODES];
     int lcs_mode;
     long long slowlog_count; /* SLOWLOG/COMMANDLOG GET: max merged entries, -1 = all */
+    uint32_t info_sections;  /* INFO: requested sections, a bit per section (see info.c) */
 };
 
 /* ── cluster / config ───────────────────────────────────────────────── */
@@ -300,6 +327,13 @@ typedef struct {
      * published, instead of waiting for it to next wake up on its own via
      * client/backend traffic. -1 until worker_thread() sets it up. */
     int wake_r, wake_w;
+    /* Set once worker_thread() has initialized db_lock and db_groups, so
+     * PROXY POOLS on another worker knows it's safe to walk this one's
+     * pools (see src/metrics.c). */
+    atomic_int stats_ready;
+    /* Clients currently connected to this worker, for INFO clients. Only
+     * this worker writes it; INFO on any worker reads it. */
+    atomic_int client_count;
 } Worker;
 
 typedef struct {
@@ -387,6 +421,13 @@ int create_unix_listener(const char *path);
 int init_tls(void);
 #endif
 
+/* Monotonic microseconds, for measuring how long clients wait on a pool. */
+static inline uint64_t mono_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
 /* ── cluster ────────────────────────────────────────────────────────── */
 void fetch_cluster_nodes(void);
 int key_slot(const char *key, int klen);
@@ -432,6 +473,15 @@ int resp3_downgrade_push(const char *buf, int len, char **out, int *out_len);
  * original buffer rather than treat this as a hard error). */
 int resp3_flatten_pairs(const char *buf, int len, char **out, int *out_len);
 int resp3_nest_pairs(const char *buf, int len, char **out, int *out_len);
+
+/* Growable byte buffer (see resp.c). Both appenders return 0 on success,
+ * -1 on allocation failure; the caller owns and frees buf. */
+typedef struct {
+    char *buf;
+    int len, cap;
+} GrowBuf;
+int gb_append(GrowBuf *g, const char *data, int len);
+int gb_append_fmt(GrowBuf *g, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 /* ── connection pool ────────────────────────────────────────────────── */
 void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db);
@@ -512,6 +562,29 @@ void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen);
 int client_name_check(Worker *w, ClientConn *client, const char *name, int namelen);
 int client_set_name(Worker *w, ClientConn *client, const char *name, int namelen);
 void send_multibulk_reply(Worker *w, ClientConn *client, const char **lines, int n);
+void send_bulk_reply(Worker *w, ClientConn *client, const char *data, int len);
+/* Sends resp[0..resp_len) to client as its reply and takes ownership of resp. */
+void fanout_send_response(Worker *w, ClientConn *client, char *resp, int resp_len);
+/* Sends cmd_buf to each node in targets on its POOL_NORMAL pool and
+ * aggregates by ctx->cmd once every node has replied. ctx must already be
+ * attached to client (client->fanout_ctx). */
+void fanout_to_nodes(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *cmd_buf, int cmd_len,
+                     const int *targets, int ntargets);
+
+/* ── proxy-local commands (see src/metrics.c) ───────────────────────── */
+void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen);
+/* Appends the "# Pools" section that PROXY POOLS returns. 0 on success,
+ * -1 on allocation failure. */
+int proxy_pools_append(Worker *w, GrowBuf *g);
+
+/* ── INFO (see src/info.c) ──────────────────────────────────────────── */
+void info_init(const char *argv0, const char *conf_path);
+void info_set_backend_versions(const char *valkey_version, const char *redis_version);
+void info_get_backend_versions(char *valkey_version, size_t vcap, char *redis_version, size_t rcap);
+void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen);
+char *info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
+void handle_proxy_info_cmd(Worker *w, ClientConn *client, int cmdlen);
+char *proxy_info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
 
 /* ── ACL / AUTH ──────────────────────────────────────────────────────── */
 void handle_auth_cmd(Worker *w, ClientConn *client);

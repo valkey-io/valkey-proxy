@@ -71,6 +71,14 @@ static char *send_big_set(int fd, const char *key, size_t len, char *out, int ou
     return resp_next_str(fd, out, outsz);
 }
 
+/* Sum every "<field><number>" occurrence in a PROXY POOLS reply. */
+static unsigned long long sum_pool_field(const char *s, const char *field) {
+    unsigned long long total = 0;
+    size_t fl = strlen(field);
+    for (const char *p = strstr(s, field); p; p = strstr(p + fl, field)) total += strtoull(p + fl, NULL, 10);
+    return total;
+}
+
 void run_general_tests(const char *host, int port, int *pass, int *fail) {
     printf("\n=== General Tests ===\n");
 
@@ -1063,6 +1071,87 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:gn:del:k3");
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:cs:foo");
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:cs:bar");
+
+    /* ── PROXY POOLS / PROXY HELP (answered by the proxy itself) ─────── */
+    /* ~330 bytes per pool line, 5 lines per node: 1MB covers well over 500 nodes. */
+    const int pools_cap = 1 << 20;
+    char *pools = malloc((size_t)pools_cap);
+    int plen = pools ? resp_send_raw_reply(fd, pools, pools_cap, 2, "PROXY", "POOLS") : -1;
+    CHECK(plen > 0 && pools[0] == '$' && strstr(pools, "# Pools"),
+          "PROXY POOLS: returns a bulk string with a Pools section", pass, fail);
+    CHECK(plen > 0 && strstr(pools, "_normal:addr=") && strstr(pools, ",open="),
+          "PROXY POOLS: reports the normal pool of each node", pass, fail);
+    unsigned long long acq_before = plen > 0 ? sum_pool_field(pools, "acquires=") : 0;
+    proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:gn:pools", "v");
+    proxy_cmd(fd, r, sizeof(r), 2, "GET", "tc:gn:pools");
+    proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:gn:pools");
+    plen = pools ? resp_send_raw_reply(fd, pools, pools_cap, 2, "PROXY", "POOLS") : -1;
+    CHECK(plen > 0 && sum_pool_field(pools, "acquires=") >= acq_before + 3,
+          "PROXY POOLS: acquires grows by at least 3 after SET/GET/DEL", pass, fail);
+
+    plen = pools ? resp_send_raw_reply(fd, pools, pools_cap, 2, "PROXY", "HELP") : -1;
+    CHECK(plen > 0 && pools[0] == '*' && strstr(pools, "POOLS"), "PROXY HELP: lists the POOLS subcommand", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "PROXY", "NOSUCH");
+    CHECK(strstr(r, "unknown PROXY subcommand") != NULL, "PROXY NOSUCH: unknown subcommand error", pass, fail);
+
+    /* ── INFO (answered as one standalone server, see src/info.c) ─────── */
+    char *info = pools;
+    int ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 1, "INFO") : -1;
+    CHECK(ilen > 0 && info[0] == '$' && strstr(info, "# Server\r\n") && strstr(info, "# Clients\r\n") &&
+              strstr(info, "# Cluster\r\ncluster_enabled:0\r\n") && strstr(info, "# Keyspace\r\n") &&
+              strstr(info, "# Proxy\r\n") && !strstr(info, "# Memory\r\n"),
+          "INFO: default sections are server, clients, cluster, keyspace and proxy", pass, fail);
+    CHECK(ilen > 0 && strstr(info, "server_mode:standalone\r\n") && strstr(info, "redis_version:") &&
+              strstr(info, "proxy_version:"),
+          "INFO: server section reports a standalone server and versions", pass, fail);
+
+    for (int i = 0; i < 12; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "tc:gn:info:%d", i);
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", key, "v");
+    }
+    proxy_cmd(fd, r, sizeof(r), 1, "DBSIZE");
+    long long dbsize = atoll(r + 1);
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 2, "INFO", "keyspace") : -1;
+    const char *db0 = ilen > 0 ? strstr(info, "db0:keys=") : NULL;
+    CHECK(db0 && atoll(db0 + 9) == dbsize && dbsize >= 12, "INFO keyspace: keys summed across shards equals DBSIZE",
+          pass, fail);
+    for (int i = 0; i < 12; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "tc:gn:info:%d", i);
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", key);
+    }
+
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 3, "INFO", "CLUSTER", "Server") : -1;
+    const char *srv = ilen > 0 ? strstr(info, "# Server\r\n") : NULL;
+    const char *clu = ilen > 0 ? strstr(info, "# Cluster\r\n") : NULL;
+    CHECK(srv && clu && srv < clu && !strstr(info, "# Keyspace"),
+          "INFO CLUSTER Server: case-insensitive, canonical order, only those sections", pass, fail);
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 2, "INFO", "nosuchsection") : -1;
+    CHECK(ilen > 0 && !strcmp(info, "$0\r\n\r\n"), "INFO nosuchsection: empty reply", pass, fail);
+
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 2, "INFO", "all") : -1;
+    CHECK(ilen > 0 && strstr(info, "# TLS\r\n") && strstr(info, "# Memory\r\nshard") &&
+              strstr(info, "# Commandstats\r\n") && !strstr(info, "# Pools\r\n"),
+          "INFO all: adds tls and the per-shard sections, not pools", pass, fail);
+    CHECK(ilen > 0 && strstr(info, ",status=ok\r\n") && strstr(info, "_used_memory:"),
+          "INFO all: per-shard sections label each shard and prefix its lines", pass, fail);
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 2, "INFO", "everything") : -1;
+    CHECK(ilen > 0 && strstr(info, "# Pools\r\n"), "INFO everything: adds pools", pass, fail);
+
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 3, "PROXY", "INFO", "keyspace") : -1;
+    CHECK(ilen > 0 && info[0] == '*' && strstr(info, "\r\n0:") && strstr(info, "# Keyspace"),
+          "PROXY INFO keyspace: each shard's own reply, labelled", pass, fail);
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 5, "PROXY", "INFO", "server", "SHARD", "0") : -1;
+    CHECK(ilen > 0 && !strncmp(info, "*2\r\n", 4) && strstr(info, "_mode:cluster"),
+          "PROXY INFO server SHARD 0: one shard's raw reply", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 5, "PROXY", "INFO", "server", "SHARD", "999");
+    CHECK(strstr(r, "unknown shard") != NULL, "PROXY INFO SHARD 999: unknown shard error", pass, fail);
+
+    ilen = info ? resp_send_raw_reply(fd, info, pools_cap, 2, "HELLO", "2") : -1;
+    CHECK(ilen > 0 && strstr(info, "$4\r\nmode\r\n$10\r\nstandalone\r\n"), "HELLO: mode is standalone, matching INFO",
+          pass, fail);
+    free(pools);
 
     for (int i = 0; i < _ntr; i++) printf("  [%s] %s\n", _tr[i].ok ? "PASS" : "FAIL", _tr[i].label);
 

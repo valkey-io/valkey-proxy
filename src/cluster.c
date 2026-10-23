@@ -1,5 +1,6 @@
 #include "proxy.h"
 #include <time.h>
+#include <sys/time.h>
 
 /* ── recv_bulk (cluster discovery only) ─────────────────────────────── */
 static char *recv_bulk(int fd, size_t *out_len) {
@@ -34,6 +35,66 @@ static char *recv_bulk(int fd, size_t *out_len) {
     }
     *out_len = len;
     return buf;
+}
+
+/* ── backend version probe ─────────────────────────────────────────── */
+/* Compares dotted versions numerically, so "8.10.0" > "8.9.1". */
+static int version_cmp(const char *a, const char *b) {
+    for (int i = 0; i < 3; i++) {
+        char *ea, *eb;
+        long x = strtol(a, &ea, 10), y = strtol(b, &eb, 10);
+        if (x != y) return x < y ? -1 : 1;
+        a = *ea == '.' ? ea + 1 : ea;
+        b = *eb == '.' ? eb + 1 : eb;
+    }
+    return 0;
+}
+
+/* Copies the value of an INFO "<field>:<value>" line into out, or "" if
+ * info has no such line. */
+static void info_field(const char *info, const char *field, char *out, size_t cap) {
+    char key[64];
+    snprintf(key, sizeof(key), "\n%s:", field);
+    out[0] = '\0';
+    const char *p = strstr(info, key);
+    if (!p) return;
+    p += strlen(key);
+    size_t n = strcspn(p, "\r\n");
+    snprintf(out, cap, "%.*s", (int)(n < cap ? n : cap - 1), p);
+}
+
+/* Records the lowest valkey_version and redis_version across nodes, via a
+ * blocking INFO server to each, for INFO and HELLO to report. The oldest
+ * shard bounds what clients can rely on, e.g. during a rolling upgrade.
+ * The previous values are kept if no node answers. */
+static void probe_backend_versions(const ClusterNode *nodes, int count) {
+    static const char cmd[] = "*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n";
+    int ms = g_config.backend_connect_timeout_ms;
+    char valkey_version[32] = "", redis_version[32] = "";
+    for (int i = 0; i < count; i++) {
+        int fd = tcp_connect_timeout(nodes[i].ip, nodes[i].port, ms);
+        if (fd < 0) continue;
+        struct timeval tv = {ms / 1000, (ms % 1000) * 1000};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        if (write(fd, cmd, sizeof(cmd) - 1) != (ssize_t)(sizeof(cmd) - 1)) {
+            close(fd);
+            continue;
+        }
+        size_t len;
+        char *resp = recv_bulk(fd, &len);
+        close(fd);
+        if (len > 0 && resp[0] == '$') {
+            char v[32], r[32];
+            info_field(resp, "valkey_version", v, sizeof(v));
+            info_field(resp, "redis_version", r, sizeof(r));
+            if (v[0] && (!valkey_version[0] || version_cmp(v, valkey_version) < 0))
+                snprintf(valkey_version, sizeof(valkey_version), "%s", v);
+            if (r[0] && (!redis_version[0] || version_cmp(r, redis_version) < 0))
+                snprintf(redis_version, sizeof(redis_version), "%s", r);
+        }
+        free(resp);
+    }
+    if (valkey_version[0] || redis_version[0]) info_set_backend_versions(valkey_version, redis_version);
 }
 
 /* Exact match against one comma-separated token in a CLUSTER NODES flags
@@ -231,6 +292,7 @@ void fetch_cluster_nodes(void) {
         printf("  [%d] %s:%d  flags=%-24s %s\n", i, g_nodes[i].ip, g_nodes[i].port, g_nodes[i].flags,
                g_nodes[i].is_master ? "(master)" : "(replica)");
     printf("\n");
+    probe_backend_versions(g_nodes, g_node_count);
 }
 
 /* ── periodic topology refresh ──────────────────────────────────────── */
@@ -263,9 +325,7 @@ static int owner_idx_seeded = 0;
  * momentarily full (a wake is already pending for it) is simply skipped --
  * either way it will still pick up the new topology, just not instantly. */
 static void wake_all_workers(void) {
-    int nw = g_config.worker_thread_no;
-    if (nw < 1) nw = 1;
-    if (nw > MAX_WORKERS) nw = MAX_WORKERS;
+    int nw = g_config.worker_thread_no; /* clamped to [1, MAX_WORKERS] by parse_conf() */
     for (int i = 0; i < nw; i++) {
         int fd = g_workers[i].wake_w;
         if (fd < 0) continue;
@@ -432,6 +492,7 @@ static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const
     wake_all_workers();
 
     printf("[topology] refresh published: %d node(s) (was %d), source=%s:%d\n", count, old_count, src_ip, src_port);
+    probe_backend_versions(nodes, count);
 }
 
 static void *topology_refresh_loop(void *arg) {
