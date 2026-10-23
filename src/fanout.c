@@ -1111,7 +1111,7 @@ static char *fanout_agg_command_count(FanoutCtx *ctx, int *out_len) {
     return r;
 }
 
-static void fanout_send_response(Worker *w, ClientConn *client, char *resp, int resp_len) {
+void fanout_send_response(Worker *w, ClientConn *client, char *resp, int resp_len) {
     if (client->wbuf_cap < resp_len) {
         char *tmp = realloc(client->wbuf, (size_t)resp_len);
         if (!tmp) {
@@ -1198,6 +1198,10 @@ void fanout_aggregate_and_reply(Worker *w, FanoutCtx *ctx) {
         resp = fanout_agg_command_list(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "CMDCOUNT")) {
         resp = fanout_agg_command_count(ctx, &resp_len);
+    } else if (!strcmp(ctx->cmd, "INFO")) {
+        resp = info_aggregate(w, ctx, &resp_len);
+    } else if (!strcmp(ctx->cmd, "PROXY_INFO")) {
+        resp = proxy_info_aggregate(w, ctx, &resp_len);
     } else {
         resp = fanout_agg_sum(ctx, &resp_len);
     }
@@ -1865,7 +1869,11 @@ static void fanout_one_master(Worker *w, ClientConn *client, FanoutCtx *ctx, con
 static void fanout_all_masters(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *cmd_buf, int cmd_len) {
     int target_nodes[MAX_NODES];
     int ntargets = topo_all_masters(w, target_nodes);
+    fanout_to_nodes(w, client, ctx, cmd_buf, cmd_len, target_nodes, ntargets);
+}
 
+void fanout_to_nodes(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *cmd_buf, int cmd_len,
+                     const int *target_nodes, int ntargets) {
     ctx->nsubs = ntargets;
     ctx->ndone = 0;
     ctx->had_error = 0;
@@ -3364,6 +3372,10 @@ void handle_nokey_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen
         handle_proxy_cmd(w, client, cmdlen);
         return;
     }
+    if (!strcmp(cmd, "INFO")) {
+        handle_info_cmd(w, client, cmdlen);
+        return;
+    }
     if (!strcmp(cmd, "PING")) {
         const char *msg;
         int msglen;
@@ -3465,9 +3477,9 @@ void handle_nokey_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen
         fd_watch(w, client->fd, EL_WRITABLE);
         return;
     }
-    if (!strcmp(cmd, "RANDOMKEY") || !strcmp(cmd, "INFO") || !strcmp(cmd, "LOLWUT") || !strcmp(cmd, "FT._LIST") ||
-        !strcmp(cmd, "FT.INFO") || !strcmp(cmd, "FT.CREATE") || !strcmp(cmd, "FT.DROPINDEX") ||
-        !strcmp(cmd, "FT.SEARCH") || !strcmp(cmd, "FT.AGGREGATE")) {
+    if (!strcmp(cmd, "RANDOMKEY") || !strcmp(cmd, "LOLWUT") || !strcmp(cmd, "FT._LIST") || !strcmp(cmd, "FT.INFO") ||
+        !strcmp(cmd, "FT.CREATE") || !strcmp(cmd, "FT.DROPINDEX") || !strcmp(cmd, "FT.SEARCH") ||
+        !strcmp(cmd, "FT.AGGREGATE")) {
         /* FT.INFO <index> with no scope options defaults to the backend's
          * LOCAL mode (only that one shard's stats); rewrite it to
          * FT.INFO <index> PRIMARY ALLSHARDS so the reply covers every

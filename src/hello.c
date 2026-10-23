@@ -109,8 +109,9 @@ static int hello_put_bulk(char *buf, int off, int cap, const char *s, int slen) 
 }
 
 /* Builds and sends this client's HELLO reply entirely locally -- no backend
- * round-trip. server/version/mode/role/modules are fixed constants (real
- * value only matters for client-library display, not protocol correctness;
+ * round-trip. server/mode/role/modules are fixed constants, and version is
+ * the backend version probed at topology discovery (real value only
+ * matters for client-library display, not protocol correctness;
  * see the plan's "边界情况" section for why this deliberately skips an INFO/
  * MODULE LIST fetch). Shape depends on client->resp: a RESP3 client gets a
  * 7-pair map (%7), a RESP2 client gets the same 14 elements flattened into
@@ -118,9 +119,12 @@ static int hello_put_bulk(char *buf, int off, int cap, const char *s, int slen) 
  * that connection ends up speaking after the switch. */
 static void build_and_send_hello_reply(Worker *w, ClientConn *client) {
     static const char *SERVER = "valkey";
-    static const char *VERSION = "7.4.0";
-    static const char *MODE = "cluster";
+    static const char *MODE = "standalone";
     static const char *ROLE = "master";
+    /* The lowest backend version, as INFO reports it (see info.c). */
+    char valkey_version[32], redis_version[32];
+    info_get_backend_versions(valkey_version, sizeof(valkey_version), redis_version, sizeof(redis_version));
+    const char *VERSION = valkey_version[0] ? valkey_version : redis_version[0] ? redis_version : "7.4.0";
 
     char buf[512];
     int off = snprintf(buf, sizeof(buf), client->resp == 3 ? "%%7\r\n" : "*14\r\n");

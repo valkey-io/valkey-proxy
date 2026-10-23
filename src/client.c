@@ -63,6 +63,7 @@ void close_client(Worker *w, ClientConn *client) {
         pool_destroy_conn(w, sc);
     }
     acl_teardown_all(w, client);
+    atomic_fetch_sub_explicit(&w->client_count, 1, memory_order_relaxed);
     free(client->wbuf);
     free(client->pbuf);
 #ifdef USE_TLS
@@ -583,9 +584,9 @@ void handle_client_readable(Worker *w, ClientConn *client) {
 
     /* HELLO's AUTH/SETNAME clauses end the command, and resp_parse_header()
      * doesn't wait for the last argument's bytes -- read until the whole
-     * (always small) command is in hbuf before dispatching it. PROXY is
-     * answered locally from hbuf too, so it needs the same. */
-    if ((!strcmp(cmd, "HELLO") || !strcmp(cmd, "PROXY")) && client->hbuf_len < total_cmd_len) {
+     * (always small) command is in hbuf before dispatching it. PROXY and
+     * INFO parse all their arguments from hbuf too, so they need the same. */
+    if ((!strcmp(cmd, "HELLO") || !strcmp(cmd, "PROXY") || !strcmp(cmd, "INFO")) && client->hbuf_len < total_cmd_len) {
         if (total_cmd_len > HDR_BUF_SIZE) {
             client_send_error(w, client, "command header too large");
             close_client(w, client);

@@ -24,8 +24,9 @@
 #endif
 
 /* ── constants ──────────────────────────────────────────────────────── */
-#define MAX_NODES   64
-#define MAX_WORKERS 64
+#define MAX_NODES     64
+#define MAX_WORKERS   64
+#define PROXY_VERSION "0.1.0"
 /* Fallback for the "max_connection" proxy.conf setting (g_config.max_connection)
  * when the config file doesn't set it. This is the shared fd budget for the
  * whole process: client sockets + backend pool connections + listener(s). */
@@ -278,6 +279,7 @@ struct FanoutCtx {
     int sub_for_node[MAX_NODES];
     int lcs_mode;
     long long slowlog_count; /* SLOWLOG/COMMANDLOG GET: max merged entries, -1 = all */
+    uint32_t info_sections;  /* INFO: requested sections, a bit per section (see info.c) */
 };
 
 /* ── cluster / config ───────────────────────────────────────────────── */
@@ -329,6 +331,9 @@ typedef struct {
      * PROXY POOLS on another worker knows it's safe to walk this one's
      * pools (see src/metrics.c). */
     atomic_int stats_ready;
+    /* Clients currently connected to this worker, for INFO clients. Only
+     * this worker writes it; INFO on any worker reads it. */
+    atomic_int client_count;
 } Worker;
 
 typedef struct {
@@ -558,9 +563,28 @@ int client_name_check(Worker *w, ClientConn *client, const char *name, int namel
 int client_set_name(Worker *w, ClientConn *client, const char *name, int namelen);
 void send_multibulk_reply(Worker *w, ClientConn *client, const char **lines, int n);
 void send_bulk_reply(Worker *w, ClientConn *client, const char *data, int len);
+/* Sends resp[0..resp_len) to client as its reply and takes ownership of resp. */
+void fanout_send_response(Worker *w, ClientConn *client, char *resp, int resp_len);
+/* Sends cmd_buf to each node in targets on its POOL_NORMAL pool and
+ * aggregates by ctx->cmd once every node has replied. ctx must already be
+ * attached to client (client->fanout_ctx). */
+void fanout_to_nodes(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *cmd_buf, int cmd_len,
+                     const int *targets, int ntargets);
 
 /* ── proxy-local commands (see src/metrics.c) ───────────────────────── */
 void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen);
+/* Appends the "# Pools" section that PROXY POOLS returns. 0 on success,
+ * -1 on allocation failure. */
+int proxy_pools_append(Worker *w, GrowBuf *g);
+
+/* ── INFO (see src/info.c) ──────────────────────────────────────────── */
+void info_init(const char *argv0, const char *conf_path);
+void info_set_backend_versions(const char *valkey_version, const char *redis_version);
+void info_get_backend_versions(char *valkey_version, size_t vcap, char *redis_version, size_t rcap);
+void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen);
+char *info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
+void handle_proxy_info_cmd(Worker *w, ClientConn *client, int cmdlen);
+char *proxy_info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
 
 /* ── ACL / AUTH ──────────────────────────────────────────────────────── */
 void handle_auth_cmd(Worker *w, ClientConn *client);

@@ -1,7 +1,8 @@
 #include "proxy.h"
 
 /* ── PROXY command ──────────────────────────────────────────────────────
- * Proxy-local introspection, answered without touching a backend.
+ * Proxy introspection. PROXY POOLS is answered locally; PROXY INFO relays
+ * each shard's own INFO (see info.c).
  *
  * PROXY POOLS reports connection pool usage per backend node and pool type,
  * summed across worker threads. The reply is a bulk string in the same
@@ -162,18 +163,18 @@ static int format_pool_totals(Worker *w, const DbTotals *dbs, int ndb, GrowBuf *
     return 0;
 }
 
-static void handle_proxy_pools(Worker *w, ClientConn *client) {
+int proxy_pools_append(Worker *w, GrowBuf *g) {
     DbTotals *dbs;
     int ndb;
-    if (collect_pool_totals(&dbs, &ndb) < 0) {
-        client_send_error(w, client, "oom");
-        client->hbuf_len = 0;
-        return;
-    }
-    GrowBuf g = {0};
-    int rc = format_pool_totals(w, dbs, ndb, &g);
+    if (collect_pool_totals(&dbs, &ndb) < 0) return -1;
+    int rc = format_pool_totals(w, dbs, ndb, g);
     free(dbs);
-    if (rc < 0) {
+    return rc;
+}
+
+static void handle_proxy_pools(Worker *w, ClientConn *client) {
+    GrowBuf g = {0};
+    if (proxy_pools_append(w, &g) < 0) {
         free(g.buf);
         client_send_error(w, client, "oom");
         client->hbuf_len = 0;
@@ -204,12 +205,19 @@ void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen) {
         handle_proxy_pools(w, client);
         return;
     }
+    if (sublen == 4 && !strncasecmp(sub, "INFO", 4)) {
+        handle_proxy_info_cmd(w, client, cmdlen);
+        return;
+    }
     if (sublen == 4 && !strncasecmp(sub, "HELP", 4)) {
         static const char *lines[] = {
             "PROXY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
             "POOLS",
             "    Return connection pool usage per backend node and pool type, summed",
             "    across worker threads.",
+            "INFO [<section> ...] [SHARD <index>|<ip:port>]",
+            "    Return each shard's own INFO reply, labelled <index>:<ip>:<port>,",
+            "    without merging. SHARD limits the reply to one shard.",
             "HELP",
             "    Print this help.",
         };

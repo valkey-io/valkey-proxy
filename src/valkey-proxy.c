@@ -140,6 +140,7 @@ static void do_accept(Worker *w, int listen_fd) {
             printf("[worker %d] client connected: unix socket  fd=%d\n", w->thread_id, fd);
         }
         w->client_map[fd] = client;
+        atomic_fetch_add_explicit(&w->client_count, 1, memory_order_relaxed);
         fd_watch(w, fd, EL_READABLE);
     }
 }
@@ -259,6 +260,7 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     parse_conf(conf_path);
+    info_init(argv[0], conf_path);
     adjust_open_files_limit();
 
     memset(g_slot_map, -1, sizeof(g_slot_map));
