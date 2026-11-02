@@ -23,7 +23,7 @@ The list below covers every supported command.
 | `CLIENT ID` | Answered by proxy |
 | `CLIENT INFO` | Answered by proxy |
 | `CLIENT KILL` | Planned |
-| `CLIENT LIST` | Answered by proxy: the proxy's own clients on every worker thread, one `CLIENT INFO` line each. Takes the filters `CLIENT HELP` lists; `USER` doesn't check that the user exists, and `TYPE primary`/`replica` match nothing |
+| `CLIENT LIST` | Answered by proxy: the proxy's own clients on every worker thread, one `CLIENT INFO` line each. Takes the filters `CLIENT HELP` lists; `USER` doesn't check that the user exists, and `TYPE primary`/`replica` match nothing. Refused while subscribed, also over RESP3, where Valkey allows it |
 | `CLIENT SETNAME` | Stored on the proxy only, never sent to a backend |
 | `ECHO` | Answered by proxy |
 | `HELLO` | Answered by proxy, except the first HELLO 3 (RESP3 probe) and AUTH with a non-default user, which go to the backend. Reports mode standalone. |

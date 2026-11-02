@@ -103,8 +103,9 @@ static int parse_filter(ClientConn *client, ClientListFilter *f, char *err, size
                      arg_eq(v, vl, "slave"))
                 f->type = CL_TYPE_NONE; /* the proxy has no replication links */
             else {
-                snprintf(err, errcap, "Unknown client type '%.*s'", vl > 64 ? 64 : vl, v);
-                /* Valkey turns CR/LF into spaces so the error stays one line. */
+                /* As much of the value as fits client_send_error()'s line, with
+                 * CR/LF turned into spaces like Valkey so it stays one line. */
+                snprintf(err, errcap, "Unknown client type '%.*s'", vl > 200 ? 200 : vl, v);
                 for (char *p = err; *p; p++)
                     if (*p == '\r' || *p == '\n') *p = ' ';
                 return -1;
@@ -277,19 +278,9 @@ static void reply(Worker *w, ClientListReq *req) {
     ClientConn *client = req->client;
     if (client) {
         client->list_req = NULL;
-        char *resp = NULL;
         int len = 0;
-        if (!req->oom) {
-            char hdr[32];
-            int hl = snprintf(hdr, sizeof(hdr), "$%d\r\n", req->out.len);
-            len = hl + req->out.len + 2;
-            resp = malloc((size_t)len);
-            if (resp) {
-                memcpy(resp, hdr, (size_t)hl);
-                if (req->out.len) memcpy(resp + hl, req->out.buf, (size_t)req->out.len);
-                memcpy(resp + hl + req->out.len, "\r\n", 2);
-            }
-        }
+        char *resp =
+            req->oom ? NULL : wrap_text_reply(client->resp == 3, req->out.len ? req->out.buf : "", req->out.len, &len);
         if (!resp) {
             const char *e = "-ERR out of memory\r\n";
             resp = strdup(e);
@@ -355,7 +346,7 @@ void client_list_forget(ClientConn *client) {
 }
 
 void handle_client_list(Worker *w, ClientConn *client) {
-    char err[128];
+    char err[256];
     ClientListReq *req = calloc(1, sizeof(*req));
     if (!req) {
         client_send_error(w, client, "out of memory");

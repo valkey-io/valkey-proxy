@@ -718,6 +718,7 @@ int proxy_pools_append(Worker *w, GrowBuf *g);
 
 /* ── INFO (see src/info.c) ──────────────────────────────────────────── */
 void info_init(const char *argv0, const char *conf_path);
+char *wrap_text_reply(int resp3, const char *text, int len, int *out_len);
 /* A module the backends have loaded, as HELLO reports it. */
 #define MAX_BACKEND_MODULES 32
 typedef struct {

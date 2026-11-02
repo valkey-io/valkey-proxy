@@ -1000,6 +1000,22 @@ static void client_process_input(Worker *w, ClientConn *client) {
         *n = (argc > 1 && *n > argc - 1) ? *n - (argc - 1) : 0;
     }
 
+    /* A subscribed client's commands go to its sub_conn, so CLIENT LIST
+     * would list the backend's clients. Valkey refuses it in RESP2. */
+    if (client->in_subscribe && !strcmp(cmd, "CLIENT")) {
+        const char *sub;
+        int sublen;
+        if (resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen) && sublen == 4 &&
+            !strncasecmp(sub, "LIST", 4)) {
+            client_send_error(w, client,
+                              client->resp == 3 ? "CLIENT LIST is not supported while subscribed"
+                                                : "Can't execute 'client|list': only (P|S)SUBSCRIBE / "
+                                                  "(P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context");
+            client->hbuf_len = 0;
+            return;
+        }
+    }
+
     if (!strcmp(cmd, "AUTH")) {
         if (client->in_subscribe) {
             client_send_error(w, client, "can't AUTH while subscribed to channels");

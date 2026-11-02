@@ -183,21 +183,27 @@ static void *worker_thread(void *arg) {
     /* Self-pipe so the topology refresh thread can pull this worker straight
      * out of el_poll(-1) the moment it publishes a change, instead of this
      * worker only noticing on its next unrelated client/backend event (see
-     * wake_all_workers() in cluster.c). */
+     * wake_all_workers() in cluster.c). Other workers' CLIENT LIST requests
+     * come in the same way, so a worker that can't watch it stops the proxy. */
     int wakefds[2];
-    if (pipe(wakefds) == 0) {
-        set_nonblocking(wakefds[0]);
-        set_nonblocking(wakefds[1]);
-        w->wake_r = wakefds[0];
-        w->wake_w = wakefds[1];
-        fd_watch(w, w->wake_r, EL_READABLE);
-        /* fd_watch() skips an fd past max_connection, and then nothing
-         * would ever serve this worker's CLIENT LIST inbox. */
-        if (w->wake_r < g_config.max_connection) atomic_store_explicit(&w->list_ready, 1, memory_order_release);
-    } else {
+    if (pipe(wakefds) < 0) {
         perror("pipe(wake)");
-        w->wake_r = w->wake_w = -1;
+        exit(1);
     }
+    set_nonblocking(wakefds[0]);
+    set_nonblocking(wakefds[1]);
+    w->wake_r = wakefds[0];
+    w->wake_w = wakefds[1];
+    if (w->wake_r >= g_config.max_connection) {
+        fprintf(stderr, "wake pipe fd %d is past max_connection %d\n", w->wake_r, g_config.max_connection);
+        exit(1);
+    }
+    w->fd_mask[w->wake_r] |= EL_READABLE;
+    if (el_add(w->el, w->wake_r, w->fd_mask[w->wake_r]) < 0) {
+        perror("el_add(wake)");
+        exit(1);
+    }
+    atomic_store_explicit(&w->list_ready, 1, memory_order_release);
 
     /* Seed this worker's topology snapshot from the global state before the
      * first db_group_create() reads it (fetch_cluster_nodes() has already
