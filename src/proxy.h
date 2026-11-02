@@ -257,6 +257,8 @@ struct ClientConn {
     int pbuf_len, pbuf_cap;
     int using_pbuf;
     FanoutCtx *fanout_ctx;
+    /* In-flight CLIENT LIST, waiting on other workers (see client_list.c). */
+    struct ClientListReq *list_req;
     PoolConn *sub_conn;
     /* 1 = an unsubscribe's fence PING is in flight on sub_conn (see
      * pubsub.c): client input is held until it comes back. */
@@ -396,6 +398,15 @@ typedef struct {
     /* Clients currently connected to this worker, for INFO clients. Only
      * this worker writes it; INFO on any worker reads it. */
     atomic_int client_count;
+    /* CLIENT LIST requests from other workers waiting for this one's
+     * clients (inbox), and this worker's own requests every worker has
+     * answered (done), both under list_lock. list_ready is set while the
+     * wake pipe is watched, so other workers can hand requests to it (see
+     * client_list.c). */
+    pthread_mutex_t list_lock;
+    struct ClientListReq **list_inbox, *list_done;
+    int list_inbox_len, list_inbox_cap;
+    atomic_int list_ready;
 } Worker;
 
 typedef struct {
@@ -677,6 +688,9 @@ void handle_script_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_function_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_command_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen);
+/* CLIENT INFO's flags field; CLIENT LIST's FLAGS filter matches against it. */
+#define CLIENT_INFO_FLAGS "N"
+int format_client_info_line(Worker *w, ClientConn *client, char *out, int cap);
 int client_name_check(Worker *w, ClientConn *client, const char *name, int namelen);
 int client_set_name(Worker *w, ClientConn *client, const char *name, int namelen);
 void send_multibulk_reply(Worker *w, ClientConn *client, const char **lines, int n);
@@ -688,6 +702,13 @@ void fanout_send_response(Worker *w, ClientConn *client, char *resp, int resp_le
  * attached to client (client->fanout_ctx). */
 void fanout_to_nodes(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *cmd_buf, int cmd_len,
                      const int *targets, int ntargets);
+
+/* ── CLIENT LIST (see src/client_list.c) ────────────────────────────── */
+typedef struct ClientListReq ClientListReq;
+void handle_client_list(Worker *w, ClientConn *client);
+void client_list_service(Worker *w);
+void client_list_forget(ClientConn *client);
+void client_list_stop(Worker *w);
 
 /* ── proxy-local commands (see src/metrics.c) ───────────────────────── */
 void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen);

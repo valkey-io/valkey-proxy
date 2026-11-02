@@ -191,6 +191,9 @@ static void *worker_thread(void *arg) {
         w->wake_r = wakefds[0];
         w->wake_w = wakefds[1];
         fd_watch(w, w->wake_r, EL_READABLE);
+        /* fd_watch() skips an fd past max_connection, and then nothing
+         * would ever serve this worker's CLIENT LIST inbox. */
+        if (w->wake_r < g_config.max_connection) atomic_store_explicit(&w->list_ready, 1, memory_order_release);
     } else {
         perror("pipe(wake)");
         w->wake_r = w->wake_w = -1;
@@ -236,6 +239,8 @@ static void *worker_thread(void *arg) {
                  * doesn't accumulate unread bytes across many wake-ups. */
                 char drain[256];
                 while (read(fd, drain, sizeof(drain)) > 0) {}
+                /* Also how other workers hand over CLIENT LIST requests. */
+                client_list_service(w);
                 continue;
             }
             if (fd < 0 || fd >= g_config.max_connection) continue;
@@ -257,6 +262,7 @@ static void *worker_thread(void *arg) {
         }
         client_run_buffered_input(w);
     }
+    client_list_stop(w);
     return NULL;
 }
 
@@ -300,7 +306,10 @@ int main(int argc, char **argv) {
      * wake_w isn't ready until its own worker_thread() runs, which happens
      * after this point, so -1 here is what tells wake_all_workers() to skip
      * a worker that isn't listening yet instead of writing to fd 0. */
-    for (int i = 0; i < MAX_WORKERS; i++) g_workers[i].wake_w = -1;
+    for (int i = 0; i < MAX_WORKERS; i++) {
+        g_workers[i].wake_w = -1;
+        pthread_mutex_init(&g_workers[i].list_lock, NULL);
+    }
 
     fetch_cluster_nodes();
     if (g_config.backend_multiplexing) {

@@ -1031,6 +1031,60 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
     CHECK(strstr(r, "sub=0 psub=0 ssub=0") != NULL, "CLIENT INFO: sub/psub/ssub default to 0", pass, fail);
     CHECK(strstr(r, "name=tc:gn:myconn") != NULL, "CLIENT INFO: reflects name set by SETNAME", pass, fail);
 
+    /* CLIENT LIST: the proxy's own clients on every worker, one CLIENT INFO
+     * line each */
+    {
+        static char big[65536];
+        int fd3 = proxy_connect(host, port);
+        char id3[32] = "-1";
+        if (fd3 >= 0) {
+            proxy_cmd(fd3, r, sizeof(r), 3, "CLIENT", "SETNAME", "tc:gn:listed");
+            proxy_cmd(fd3, r, sizeof(r), 2, "CLIENT", "ID");
+            snprintf(id3, sizeof(id3), "%s", r + 1);
+        }
+        int len = resp_send_raw_reply(fd, big, sizeof(big), 2, "CLIENT", "LIST");
+        CHECK(len > 0 && big[0] == '$' && strstr(big, "name=tc:gn:myconn ") && strstr(big, "name=tc:gn:listed ") &&
+                  strstr(big, "cmd=client|list"),
+              "CLIENT LIST: lists this connection and the others", pass, fail);
+        len = resp_send_raw_reply(fd, big, sizeof(big), 4, "CLIENT", "LIST", "ID", id3);
+        CHECK(len > 0 && strstr(big, "name=tc:gn:listed ") && !strstr(big, "name=tc:gn:myconn "),
+              "CLIENT LIST ID: only the given client", pass, fail);
+        len = resp_send_raw_reply(fd, big, sizeof(big), 4, "CLIENT", "LIST", "NAME", "tc:gn:myconn");
+        CHECK(len > 0 && strstr(big, "name=tc:gn:myconn ") && !strstr(big, "name=tc:gn:listed "),
+              "CLIENT LIST NAME: filters by name", pass, fail);
+        len = resp_send_raw_reply(fd, big, sizeof(big), 6, "CLIENT", "LIST", "SKIPME", "yes", "NAME", "tc:gn:myconn");
+        CHECK(len > 0 && !strcmp(big, "$0\r\n\r\n"), "CLIENT LIST SKIPME yes: leaves out the caller", pass, fail);
+        len = resp_send_raw_reply(fd, big, sizeof(big), 4, "CLIENT", "LIST", "TYPE", "primary");
+        CHECK(len > 0 && !strcmp(big, "$0\r\n\r\n"), "CLIENT LIST TYPE primary: empty, the proxy has no replicas", pass,
+              fail);
+        proxy_cmd(fd, r, sizeof(r), 4, "CLIENT", "LIST", "TYPE", "foo");
+        CHECK(strstr(r, "Unknown client type 'foo'") != NULL, "CLIENT LIST TYPE foo: error", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 4, "CLIENT", "LIST", "IDLE", "0");
+        CHECK(strstr(r, "idle should be greater than 0") != NULL, "CLIENT LIST IDLE 0: error", pass, fail);
+        /* CR/LF in the echoed type must not split the error into two replies */
+        const char *crlf_args[] = {"CLIENT", "LIST", "TYPE", "x\r\n:1"};
+        const int crlf_lens[] = {6, 4, 4, 6};
+        resp_send_raw(fd, 4, crlf_args, crlf_lens);
+        len = read_raw_reply(fd, big, sizeof(big));
+        CHECK(len > 0 && !strcmp(big, "-ERR Unknown client type 'x  :1'\r\n"),
+              "CLIENT LIST TYPE with CR/LF: one-line error", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 1, "PING");
+        CHECK(!strcmp(r, "+PONG"), "CLIENT LIST TYPE with CR/LF: next reply still in step", pass, fail);
+        /* The last argument arriving in a later read must not be parsed early */
+        const char *part1 = "*4\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$4\r\nNAME\r\n$12\r\ntc:gn";
+        const char *part2 = ":listed\r\n*1\r\n$4\r\nPING\r\n";
+        int ok = write(fd, part1, strlen(part1)) == (ssize_t)strlen(part1);
+        usleep(200000);
+        ok = ok && write(fd, part2, strlen(part2)) == (ssize_t)strlen(part2);
+        len = ok ? read_raw_reply(fd, big, sizeof(big)) : -1;
+        CHECK(len > 0 && big[0] == '$' && strstr(big, "name=tc:gn:listed ") && !strstr(big, "name=tc:gn:myconn "),
+              "CLIENT LIST split across reads: filters on the whole name", pass, fail);
+        len = ok ? read_raw_reply(fd, big, sizeof(big)) : -1;
+        CHECK(len > 0 && !strcmp(big, "+PONG\r\n"), "CLIENT LIST split across reads: next reply still in step", pass,
+              fail);
+        if (fd3 >= 0) close(fd3);
+    }
+
     /* cleanup */
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:gn:obj");
     proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:gn:exists");
