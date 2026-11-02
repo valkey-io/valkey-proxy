@@ -688,8 +688,11 @@ void handle_script_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_function_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_command_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen);
-/* CLIENT INFO's flags field; CLIENT LIST's FLAGS filter matches against it. */
-#define CLIENT_INFO_FLAGS "N"
+/* CLIENT INFO's flags field, P for a subscribed client as on Valkey; CLIENT
+ * LIST's FLAGS filter matches against it. */
+static inline const char *client_info_flags(const ClientConn *c) {
+    return c->sub_count + c->psub_count + c->ssub_count > 0 ? "P" : "N";
+}
 int format_client_info_line(Worker *w, ClientConn *client, char *out, int cap);
 int client_name_check(Worker *w, ClientConn *client, const char *name, int namelen);
 int client_set_name(Worker *w, ClientConn *client, const char *name, int namelen);

@@ -200,7 +200,7 @@ static int filter_match(const ClientListFilter *f, ClientConn *c, time_t now) {
         if (strlen(f->ip) != iplen || strncmp(f->ip, c->addr, iplen)) return 0;
     }
     for (const char *p = f->flags; *p; p++)
-        if (!strchr(CLIENT_INFO_FLAGS, *p)) return 0;
+        if (!strchr(client_info_flags(c), *p)) return 0;
     if (f->maxage && (long long)(now - c->connect_time) < f->maxage) return 0;
     if (f->idle && (long long)(now - c->last_interaction) < f->idle) return 0;
     if (f->db >= 0 && c->db != f->db) return 0;
@@ -366,10 +366,7 @@ void handle_client_list(Worker *w, ClientConn *client) {
     req->refs = 1;
     req->pending = 1; /* this worker's own share, added last */
 
-    /* Without its own wake pipe this worker would never hear back, so it
-     * lists only its own clients. */
-    int ask_others = atomic_load_explicit(&w->list_ready, memory_order_acquire);
-    for (int i = 0; ask_others && i < g_config.worker_thread_no; i++) {
+    for (int i = 0; i < g_config.worker_thread_no; i++) {
         Worker *ow = &g_workers[i];
         if (ow == w || !atomic_load_explicit(&ow->list_ready, memory_order_acquire)) continue;
         pthread_mutex_lock(&req->lock);

@@ -2666,12 +2666,12 @@ int format_client_info_line(Worker *w, ClientConn *client, char *out, int cap) {
     const char *user = client->acl_authenticated ? client->acl_user : "default";
 
     return snprintf(out, (size_t)cap,
-                    "id=%lld addr=%s laddr=%s fd=%d name=%s age=%lld idle=%lld flags=" CLIENT_INFO_FLAGS " db=%d "
+                    "id=%lld addr=%s laddr=%s fd=%d name=%s age=%lld idle=%lld flags=%s db=%d "
                     "sub=%d psub=%d ssub=%d multi=%d watch=%d events=%s cmd=%s user=%s resp=%d",
                     client->id, client->addr, client->laddr, client->fd, client->name,
-                    (long long)(now - client->connect_time), (long long)(now - client->last_interaction), client->db,
-                    client->sub_count, client->psub_count, client->ssub_count, client->multi_count, client->watch_count,
-                    events, client->last_cmd, user, client->resp);
+                    (long long)(now - client->connect_time), (long long)(now - client->last_interaction),
+                    client_info_flags(client), client->db, client->sub_count, client->psub_count, client->ssub_count,
+                    client->multi_count, client->watch_count, events, client->last_cmd, user, client->resp);
 }
 
 /* Validates a client name (CLIENT SETNAME / HELLO ... SETNAME) without

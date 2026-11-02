@@ -474,6 +474,10 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     close(sub2);
     close(sub3);
 
+    /* CLIENT LIST is a verbatim string over RESP3, like Valkey */
+    n = resp_send_raw_reply(fd3, raw, sizeof(raw), 4, "CLIENT", "LIST", "ID", "999999999");
+    CHECK(n > 0 && !strcmp(raw, "=4\r\ntxt:\r\n"), "CLIENT LIST: verbatim string over RESP3", pass, fail);
+
     /* ── cleanup ──────────────────────────────────────────────────────── */
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:k1");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:hash");

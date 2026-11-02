@@ -180,28 +180,16 @@ static void *worker_thread(void *arg) {
     if (g_tcp_fd >= 0) fd_watch(w, g_tcp_fd, EL_READABLE);
     if (g_unix_fd >= 0) fd_watch(w, g_unix_fd, EL_READABLE);
 
-    /* Self-pipe so the topology refresh thread can pull this worker straight
-     * out of el_poll(-1) the moment it publishes a change, instead of this
-     * worker only noticing on its next unrelated client/backend event (see
-     * wake_all_workers() in cluster.c). Other workers' CLIENT LIST requests
-     * come in the same way, so a worker that can't watch it stops the proxy. */
-    int wakefds[2];
-    if (pipe(wakefds) < 0) {
-        perror("pipe(wake)");
-        exit(1);
-    }
-    set_nonblocking(wakefds[0]);
-    set_nonblocking(wakefds[1]);
-    w->wake_r = wakefds[0];
-    w->wake_w = wakefds[1];
-    if (w->wake_r >= g_config.max_connection) {
-        fprintf(stderr, "wake pipe fd %d is past max_connection %d\n", w->wake_r, g_config.max_connection);
-        exit(1);
-    }
+    /* The wake pipe main() made, so the topology refresh thread can pull
+     * this worker straight out of el_poll(-1) the moment it publishes a
+     * change, instead of this worker only noticing on its next unrelated
+     * client/backend event (see wake_all_workers() in cluster.c). Other
+     * workers' CLIENT LIST requests come in the same way, so a worker that
+     * can't watch it doesn't start. */
     w->fd_mask[w->wake_r] |= EL_READABLE;
     if (el_add(w->el, w->wake_r, w->fd_mask[w->wake_r]) < 0) {
         perror("el_add(wake)");
-        exit(1);
+        return NULL;
     }
     atomic_store_explicit(&w->list_ready, 1, memory_order_release);
 
@@ -307,14 +295,28 @@ int main(int argc, char **argv) {
     if (g_config.tls_enabled && init_tls() < 0) exit(1);
 #endif
 
-    /* Must be set before the refresh thread can possibly start signalling
-     * workers (see wake_all_workers() in cluster.c) -- each worker's real
-     * wake_w isn't ready until its own worker_thread() runs, which happens
-     * after this point, so -1 here is what tells wake_all_workers() to skip
-     * a worker that isn't listening yet instead of writing to fd 0. */
+    /* Each worker's wake pipe is made here, before any other thread runs,
+     * so its fds are low and a failure stops the proxy at startup. A byte
+     * written before the worker watches the pipe waits for it there. -1
+     * tells wake_all_workers() (cluster.c) to skip the unused slots. */
     for (int i = 0; i < MAX_WORKERS; i++) {
-        g_workers[i].wake_w = -1;
+        g_workers[i].wake_r = g_workers[i].wake_w = -1;
         pthread_mutex_init(&g_workers[i].list_lock, NULL);
+    }
+    for (int i = 0; i < g_config.worker_thread_no; i++) {
+        int wakefds[2];
+        if (pipe(wakefds) < 0) {
+            perror("pipe(wake)");
+            exit(1);
+        }
+        if (wakefds[0] >= g_config.max_connection) {
+            fprintf(stderr, "wake pipe fd %d is past max_connection %d\n", wakefds[0], g_config.max_connection);
+            exit(1);
+        }
+        set_nonblocking(wakefds[0]);
+        set_nonblocking(wakefds[1]);
+        g_workers[i].wake_r = wakefds[0];
+        g_workers[i].wake_w = wakefds[1];
     }
 
     fetch_cluster_nodes();

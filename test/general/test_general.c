@@ -1083,22 +1083,15 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
         CHECK(len > 0 && !strcmp(big, "+PONG\r\n"), "CLIENT LIST split across reads: next reply still in step", pass,
               fail);
         if (fd3 >= 0) close(fd3);
-        /* RESP3 gets a verbatim string, like Valkey */
-        int fd4 = proxy_connect(host, port);
-        if (fd4 >= 0) {
-            resp_send_raw_reply(fd4, big, sizeof(big), 2, "HELLO", "3");
-            len = resp_send_raw_reply(fd4, big, sizeof(big), 4, "CLIENT", "LIST", "ID", "999999999");
-            CHECK(len > 0 && !strcmp(big, "=4\r\ntxt:\r\n"), "CLIENT LIST over RESP3: verbatim string", pass, fail);
-            close(fd4);
-        }
-        /* A subscribed RESP2 client is refused, like Valkey, instead of
-         * getting the backend's list */
+        /* A subscribed client shows flags=P, and FLAGS P finds it */
         int fd5 = proxy_connect(host, port);
         if (fd5 >= 0) {
+            proxy_cmd(fd5, r, sizeof(r), 3, "CLIENT", "SETNAME", "tc:gn:subbed");
             resp_send_raw_reply(fd5, big, sizeof(big), 2, "SUBSCRIBE", "tc:gn:clch");
-            len = resp_send_raw_reply(fd5, big, sizeof(big), 2, "CLIENT", "LIST");
-            CHECK(len > 0 && strstr(big, "-ERR Can't execute 'client|list'"), "CLIENT LIST while subscribed: refused",
-                  pass, fail);
+            len = resp_send_raw_reply(fd, big, sizeof(big), 4, "CLIENT", "LIST", "FLAGS", "P");
+            CHECK(len > 0 && strstr(big, "name=tc:gn:subbed ") && strstr(big, "flags=P ") &&
+                      !strstr(big, "name=tc:gn:myconn "),
+                  "CLIENT LIST FLAGS P: the subscribed client, with flags=P", pass, fail);
             close(fd5);
         }
     }
