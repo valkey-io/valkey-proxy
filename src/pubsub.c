@@ -1,10 +1,11 @@
 #include "proxy.h"
 
 /* Parse subscribe/unsubscribe confirmation and return the subscription count.
- * Format: *3\r\n$N\r\n(un)subscribe\r\n$M\r\nchannel\r\n:count\r\n
+ * Format: *3\r\n$N\r\n(un)subscribe\r\n$M\r\nchannel\r\n:count\r\n, or with
+ * '>' and a '_' channel (none) from a RESP3 sub_conn.
  * Returns count (>=0) or -1 if the message is not a confirmation. */
 static int parse_sub_count_from_msg(const char *buf, int len) {
-    if (len < 10 || buf[0] != '*') return -1;
+    if (len < 10 || (buf[0] != '*' && buf[0] != '>')) return -1;
     const char *nl = memchr(buf + 1, '\n', len - 1);
     if (!nl || atoi(buf + 1) != 3) return -1;
     int off = (int)(nl - buf) + 1;
@@ -28,13 +29,17 @@ static int parse_sub_count_from_msg(const char *buf, int len) {
     if (!is_ctrl) return -1;
 
     off = ds + namelen + 2;
-    if (off >= len || buf[off] != '$') return -1;
-    const char *p3 = buf + off + 1;
-    const char *nl3 = memchr(p3, '\n', len - off - 1);
-    if (!nl3) return -1;
-    int chanlen = atoi(p3);
-    int ds2 = (int)(nl3 - buf) + 1;
-    off = ds2 + (chanlen >= 0 ? chanlen + 2 : 0);
+    if (off + 3 <= len && !memcmp(buf + off, "_\r\n", 3)) {
+        off += 3;
+    } else {
+        if (off >= len || buf[off] != '$') return -1;
+        const char *p3 = buf + off + 1;
+        const char *nl3 = memchr(p3, '\n', len - off - 1);
+        if (!nl3) return -1;
+        int chanlen = atoi(p3);
+        int ds2 = (int)(nl3 - buf) + 1;
+        off = ds2 + (chanlen >= 0 ? chanlen + 2 : 0);
+    }
 
     if (off >= len || buf[off] != ':') return -1;
     return atoi(buf + off + 1);
@@ -95,6 +100,47 @@ static int is_sub_fence_reply(const char *buf, int len) {
     return len == n && (buf[0] == '*' || buf[0] == '>') && !memcmp(buf + 1, exp + 1, (size_t)n - 1);
 }
 
+/* Appends "-ERR msg" to the client's output. Returns -1 out of memory. */
+static int client_append_error(ClientConn *cl, const char *msg) {
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "-ERR %s\r\n", msg);
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    if (cl->wbuf_cap < cl->wbuf_len + n) {
+        int nc = cl->wbuf_len + n + 4096;
+        char *tmp = realloc(cl->wbuf, (size_t)nc);
+        if (!tmp) return -1;
+        cl->wbuf = tmp;
+        cl->wbuf_cap = nc;
+    }
+    memcpy(cl->wbuf + cl->wbuf_len, buf, (size_t)n);
+    cl->wbuf_len += n;
+    return 0;
+}
+
+/* CLIENT LIST from a subscribed client. Valkey refuses it in RESP2; the
+ * proxy refuses it in RESP3 too, since its own list can't be sent from
+ * subscribe mode. Going to the backend instead would list the backend's
+ * clients once the sub_conn speaks RESP3. The error waits behind a fence
+ * like an unsubscribe's, so it comes after every reply sub_conn still owes. */
+void handle_subscribed_client_list(Worker *w, ClientConn *client) {
+    const char *err = client->resp == 3 ? "CLIENT LIST is not supported while subscribed"
+                                        : "Can't execute 'client|list': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / "
+                                          "PING / QUIT / RESET are allowed in this context";
+    client->hbuf_len = 0;
+    if (!client->sub_conn) {
+        client_send_error(w, client, err);
+        return;
+    }
+    if (sub_conn_send_fence(w, client->sub_conn) < 0) {
+        close_client(w, client);
+        return;
+    }
+    client->sub_fence_pending = 1;
+    client->sub_fence_error = err;
+    client->state = CS_READING_HDR;
+    fd_watch(w, client->fd, EL_READABLE);
+}
+
 void handle_sub_conn_readable(Worker *w, PoolConn *conn) {
     ClientConn *cl = conn->waiting_client;
     if (!cl) {
@@ -146,6 +192,14 @@ void handle_sub_conn_readable(Worker *w, PoolConn *conn) {
         if (cl->sub_fence_pending && is_sub_fence_reply(conn->rbuf + off, rlen)) {
             off += rlen;
             cl->sub_fence_pending = 0;
+            if (cl->sub_fence_error) {
+                int rc = client_append_error(cl, cl->sub_fence_error);
+                cl->sub_fence_error = NULL;
+                if (rc < 0) {
+                    close_client(w, cl);
+                    return;
+                }
+            }
             if (cl->in_subscribe) {
                 resume_input = 1;
                 continue;

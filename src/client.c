@@ -1000,6 +1000,16 @@ static void client_process_input(Worker *w, ClientConn *client) {
         *n = (argc > 1 && *n > argc - 1) ? *n - (argc - 1) : 0;
     }
 
+    if (client->in_subscribe && !strcmp(cmd, "CLIENT")) {
+        const char *sub;
+        int sublen;
+        if (resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen) && sublen == 4 &&
+            !strncasecmp(sub, "LIST", 4)) {
+            handle_subscribed_client_list(w, client);
+            return;
+        }
+    }
+
     if (!strcmp(cmd, "AUTH")) {
         if (client->in_subscribe) {
             client_send_error(w, client, "can't AUTH while subscribed to channels");

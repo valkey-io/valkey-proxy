@@ -263,6 +263,8 @@ struct ClientConn {
     /* 1 = an unsubscribe's fence PING is in flight on sub_conn (see
      * pubsub.c): client input is held until it comes back. */
     int sub_fence_pending;
+    /* Error to send once that fence is back (a subscribed CLIENT LIST). */
+    const char *sub_fence_error;
     /* ── CLIENT ID / GETNAME / SETNAME (see handle_client_cmd in fanout.c) ── */
     long long id;
     char name[64];
@@ -680,6 +682,7 @@ void handle_multikey_complete(Worker *w, ClientConn *client, const char *cmd);
 void handle_sub_conn_readable(Worker *w, PoolConn *conn);
 void handle_blocking_complete(Worker *w, ClientConn *client, const char *cmd);
 void handle_pubsub_cmd(Worker *w, ClientConn *client, int cmdlen, const char *cmd, const char *key, int keylen);
+void handle_subscribed_client_list(Worker *w, ClientConn *client);
 void handle_pubsub_inspect_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_slowlog_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_commandlog_cmd(Worker *w, ClientConn *client, int cmdlen);

@@ -1092,6 +1092,18 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
             CHECK(len > 0 && strstr(big, "name=tc:gn:subbed ") && strstr(big, "flags=P ") &&
                       !strstr(big, "name=tc:gn:myconn "),
                   "CLIENT LIST FLAGS P: the subscribed client, with flags=P", pass, fail);
+            /* Its own CLIENT LIST is refused like on Valkey, after the
+             * replies already owed */
+            const char *pipe3 = "*2\r\n$9\r\nSUBSCRIBE\r\n$11\r\ntc:gn:clch2\r\n*1\r\n$4\r\nPING\r\n"
+                                "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n";
+            int ok5 = write(fd5, pipe3, strlen(pipe3)) == (ssize_t)strlen(pipe3);
+            int l1 = ok5 ? read_raw_reply(fd5, big, sizeof(big)) : -1;
+            int in_order = l1 > 0 && big[0] == '*' && strstr(big, "tc:gn:clch2");
+            l1 = ok5 ? read_raw_reply(fd5, big, sizeof(big)) : -1;
+            in_order = in_order && l1 > 0 && strstr(big, "pong");
+            l1 = ok5 ? read_raw_reply(fd5, big, sizeof(big)) : -1;
+            CHECK(in_order && l1 > 0 && !strncmp(big, "-ERR Can't execute 'client|list'", 32),
+                  "CLIENT LIST while subscribed: refused, after the earlier replies", pass, fail);
             close(fd5);
         }
     }

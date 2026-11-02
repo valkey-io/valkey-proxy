@@ -155,6 +155,25 @@ static void do_accept(Worker *w, int listen_fd) {
 }
 
 /* ── worker thread ──────────────────────────────────────────────────── */
+/* Each worker reports whether it started, and main() waits for all of them
+ * so a failed one stops the proxy with a non-zero exit. */
+static pthread_mutex_t g_start_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_start_cond = PTHREAD_COND_INITIALIZER;
+static int g_workers_reported, g_workers_failed;
+
+static void report_start(int ok) {
+    pthread_mutex_lock(&g_start_lock);
+    g_workers_reported++;
+    if (!ok) g_workers_failed++;
+    pthread_cond_signal(&g_start_cond);
+    pthread_mutex_unlock(&g_start_lock);
+}
+
+static void *worker_failed(void) {
+    report_start(0);
+    return NULL;
+}
+
 static void *worker_thread(void *arg) {
     Worker *w = (Worker *)arg;
     w->el = el_create(g_config.max_connection);
@@ -168,13 +187,13 @@ static void *worker_thread(void *arg) {
     w->input_ready_len = 0;
     if (!w->client_map || !w->backend_map || !w->fd_mask || !w->input_ready) {
         fprintf(stderr, "out of memory allocating connection tables (max_connection=%d)\n", g_config.max_connection);
-        return NULL;
+        return worker_failed();
     }
     pthread_mutex_init(&w->db_lock, NULL);
     atomic_store_explicit(&w->stats_ready, 1, memory_order_release);
     if (!w->el) {
         fprintf(stderr, "el_create failed\n");
-        return NULL;
+        return worker_failed();
     }
 
     if (g_tcp_fd >= 0) fd_watch(w, g_tcp_fd, EL_READABLE);
@@ -189,9 +208,10 @@ static void *worker_thread(void *arg) {
     w->fd_mask[w->wake_r] |= EL_READABLE;
     if (el_add(w->el, w->wake_r, w->fd_mask[w->wake_r]) < 0) {
         perror("el_add(wake)");
-        return NULL;
+        return worker_failed();
     }
     atomic_store_explicit(&w->list_ready, 1, memory_order_release);
+    report_start(1);
 
     /* Seed this worker's topology snapshot from the global state before the
      * first db_group_create() reads it (fetch_cluster_nodes() has already
@@ -350,6 +370,14 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nw; i++) {
         g_workers[i].thread_id = i;
         pthread_create(&g_workers[i].tid, NULL, worker_thread, &g_workers[i]);
+    }
+    pthread_mutex_lock(&g_start_lock);
+    while (g_workers_reported < nw) pthread_cond_wait(&g_start_cond, &g_start_lock);
+    int failed = g_workers_failed;
+    pthread_mutex_unlock(&g_start_lock);
+    if (failed) {
+        fprintf(stderr, "%d of %d worker thread(s) failed to start\n", failed, nw);
+        exit(1);
     }
     for (int i = 0; i < nw; i++) pthread_join(g_workers[i].tid, NULL);
     return 0;

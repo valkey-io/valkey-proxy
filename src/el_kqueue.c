@@ -35,15 +35,16 @@ static void el_api_free(EventLoop *el) {
 static int el_api_add(EventLoop *el, int fd, int mask) {
     KqueueState *s = el->state;
     struct kevent ke;
+    int rc = 0;
     if (mask & EL_READABLE) {
         EV_SET(&ke, fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
-        kevent(s->kqfd, &ke, 1, NULL, 0, NULL);
+        if (kevent(s->kqfd, &ke, 1, NULL, 0, NULL) < 0) rc = -1;
     }
     if (mask & EL_WRITABLE) {
         EV_SET(&ke, fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, NULL);
-        kevent(s->kqfd, &ke, 1, NULL, 0, NULL);
+        if (kevent(s->kqfd, &ke, 1, NULL, 0, NULL) < 0) rc = -1;
     }
-    return 0;
+    return rc;
 }
 
 static void el_api_del(EventLoop *el, int fd) {
