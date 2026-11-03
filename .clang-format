@@ -1,0 +1,22 @@
+# Based on Valkey's .clang-format (https://github.com/valkey-io/valkey)
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+BreakBeforeBraces: Attach
+IndentCaseLabels: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Empty
+AlignConsecutiveMacros: Consecutive
+AlignTrailingComments: true
+AlignEscapedNewlines: Left
+SpaceBeforeParens: ControlStatements
+MaxEmptyLinesToKeep: 2
+# event_loop.c includes el_*.c backends; include order matters.
+SortIncludes: Never
+# Keep hand-formatted comments and section banners intact.
+ReflowComments: false
