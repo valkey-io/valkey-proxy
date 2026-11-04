@@ -1,4 +1,5 @@
 #include "proxy.h"
+#include <netdb.h>
 
 #define DEFAULT_BACKEND_CONNECT_TIMEOUT_MS 1000
 #define DEFAULT_SHARED_CONNECTION_PER_NODE 4
@@ -36,9 +37,14 @@ void parse_conf(const char *path) {
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == '\n') continue;
         if (sscanf(line, "%63s %447s", key, val) != 2) continue;
-        if (!strcmp(key, "server-ip"))
-            snprintf(g_config.server_ip, 64, "%.63s", val);
-        else if (!strcmp(key, "server-port"))
+        if (!strcmp(key, "server-ip")) {
+            if (strlen(val) >= sizeof(g_config.server_ip)) {
+                fprintf(stderr, "server-ip exceeds the maximum hostname length of %zu characters\n",
+                        sizeof(g_config.server_ip) - 1);
+                exit(1);
+            }
+            snprintf(g_config.server_ip, sizeof(g_config.server_ip), "%s", val);
+        } else if (!strcmp(key, "server-port"))
             g_config.server_port = atoi(val);
         else if (!strcmp(key, "bind"))
             snprintf(g_config.bind_ip, 64, "%.63s", val);
@@ -149,7 +155,7 @@ void set_nonblocking(int fd) {
  * possibly still-booting promoted replica) and the periodic topology
  * refresh (its own thread, but retried every cycle) both want to fail fast
  * instead of tying up a thread for seconds on end. */
-int tcp_connect_timeout(const char *ip, int port, int timeout_ms) {
+static int tcp_connect_ipv4(const char *ip, int port, int timeout_ms) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         perror("socket");
@@ -201,6 +207,35 @@ int tcp_connect_timeout(const char *ip, int port, int timeout_ms) {
     }
 
     fcntl(fd, F_SETFL, flags);
+    return fd;
+}
+
+/* Numeric backend addresses avoid DNS entirely. Hostnames (including the
+ * configured seed) are resolved on each connection, so pod IP changes are
+ * picked up by topology refresh. The timeout bounds each TCP handshake;
+ * getaddrinfo() uses the system resolver's own timeout. */
+int tcp_connect_timeout(const char *host, int port, int timeout_ms) {
+    struct in_addr numeric;
+    if (inet_pton(AF_INET, host, &numeric) == 1) return tcp_connect_ipv4(host, port, timeout_ms);
+
+    struct addrinfo hints = {0}, *addresses = NULL;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    int err = getaddrinfo(host, NULL, &hints, &addresses);
+    if (err != 0) {
+        fprintf(stderr, "Could not resolve Valkey host %s: %s\n", host, gai_strerror(err));
+        return -1;
+    }
+
+    int fd = -1;
+    for (struct addrinfo *a = addresses; a; a = a->ai_next) {
+        char ip[INET_ADDRSTRLEN];
+        struct sockaddr_in *addr = (struct sockaddr_in *)a->ai_addr;
+        if (!inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip))) continue;
+        fd = tcp_connect_ipv4(ip, port, timeout_ms);
+        if (fd >= 0) break;
+    }
+    freeaddrinfo(addresses);
     return fd;
 }
 

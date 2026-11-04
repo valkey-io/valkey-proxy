@@ -34,6 +34,17 @@ server-port  6379
 bind  192.168.1.200
 port  7777
 ```
+`server-ip` accepts an IPv4 address or a DNS hostname of up to 253 characters,
+for example `valkey-0.valkey-headless.session-storage.svc.cluster.local`.
+Hostnames are resolved to IPv4 addresses on every new connection, including
+periodic topology refresh, so a changed seed address is picked up without a
+proxy restart. Each returned address is tried until a connection succeeds.
+The backend connection timeout applies to each TCP connection attempt; DNS
+resolution uses the system resolver's timeout.
+
+Run `make test-config` for standalone configuration and hostname connection tests
+(no running Valkey cluster required).
+
 Optional parameters:
 ```
 worker-thread-no  1    # number of worker threads (default: 1)

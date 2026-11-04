@@ -576,7 +576,7 @@ static void *topology_refresh_loop(void *arg) {
 
         ClusterNode dn[MAX_NODES];
         int dcount = 0, dslot[CLUSTER_SLOTS];
-        char used_ip[64];
+        char used_ip[sizeof(g_config.server_ip)];
         int used_port;
         snprintf(used_ip, sizeof(used_ip), "%s", g_config.server_ip);
         used_port = g_config.server_port;
