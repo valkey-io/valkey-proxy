@@ -76,17 +76,32 @@ static int format_sockaddr(struct sockaddr_storage *sa, char *out, int cap) {
     return 0;
 }
 
-/* ── accept ─────────────────────────────────────────────────────────── */
-static void do_accept(Worker *w, int listen_fd) {
+/* ── accept (main thread) ───────────────────────────────────────────── */
+/* The worker with the fewest clients, among those ready for handoffs; ties
+ * go round-robin by starting the scan one past the previous pick. -1 if no
+ * worker is ready. Only the main thread calls this. */
+static int pick_worker(void) {
+    static int next = 0;
+    int nw = g_config.worker_thread_no, best = -1, best_count = 0;
+    for (int k = 0; k < nw; k++) {
+        int i = (next + k) % nw;
+        if (atomic_load_explicit(&g_workers[i].handoff_ready, memory_order_acquire) != 1) continue;
+        int c = atomic_load_explicit(&g_workers[i].client_count, memory_order_relaxed);
+        if (best < 0 || c < best_count) best = i, best_count = c;
+    }
+    if (best >= 0) next = (best + 1) % nw;
+    return best;
+}
+
+static void accept_and_dispatch(int listen_fd) {
     /* listen_fd is registered edge-triggered (EPOLLET): a single readiness
      * notification can represent multiple queued connections, so every one
      * of them must be drained here or the leftover ones never get another
      * edge and sit in the kernel backlog forever. */
     for (;;) {
-        struct sockaddr_storage sa;
-        socklen_t salen = sizeof(sa);
-        int fd = accept(listen_fd, (struct sockaddr *)&sa, &salen);
+        int fd = accept(listen_fd, NULL, NULL);
         if (fd < 0) {
+            if (errno == EINTR) continue;
             if (errno != EAGAIN && errno != EWOULDBLOCK) perror("accept");
             return;
         }
@@ -102,55 +117,119 @@ static void do_accept(Worker *w, int listen_fd) {
             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
         }
 
-        ClientConn *client = calloc(1, sizeof(ClientConn));
-        if (!client) {
+        int wi = pick_worker();
+        if (wi < 0) {
             close(fd);
             continue;
         }
-        client->fd = fd;
-        client->db = g_config.db;
-        client->state = CS_READING_HDR;
-        client->resp = 2;
-        client->id = atomic_fetch_add(&g_next_client_id, 1) + 1;
-        client->connect_time = client->last_interaction = time(NULL);
-        client->multi_count = -1;
+        Worker *w = &g_workers[wi];
+        /* Counted now, not when the worker gets to it: the next pick, even
+         * within this same burst, must already see it. */
+        int now = atomic_fetch_add_explicit(&w->client_count, 1, memory_order_relaxed) + 1;
+        if (now > atomic_load_explicit(&w->client_peak, memory_order_relaxed))
+            atomic_store_explicit(&w->client_peak, now, memory_order_relaxed);
+        ssize_t wr;
+        do wr = write(w->handoff_w, &fd, sizeof(fd));
+        while (wr < 0 && errno == EINTR);
+        if (wr != (ssize_t)sizeof(fd)) {
+            perror("write(handoff)");
+            atomic_fetch_sub_explicit(&w->client_count, 1, memory_order_relaxed);
+            close(fd);
+        }
+    }
+}
 
-        if (!format_sockaddr(&sa, client->addr, sizeof(client->addr)))
-            snprintf(client->addr, sizeof(client->addr), "%s:0", g_config.unix_socket_path);
+/* Runs on the main thread for the life of the process: accepts every
+ * client and hands it to the least-loaded worker, so connections spread
+ * evenly instead of going to whichever worker woke up first. */
+static void accept_loop(void) {
+    EventLoop *el = el_create(4);
+    if (!el) {
+        fprintf(stderr, "el_create failed (accept loop)\n");
+        exit(1);
+    }
+    if (g_tcp_fd >= 0) el_add(el, g_tcp_fd, EL_READABLE);
+    if (g_unix_fd >= 0) el_add(el, g_unix_fd, EL_READABLE);
+    for (;;) {
+        int n = el_poll(el, -1);
+        if (n < 0) {
+            perror("el_poll (accept loop)");
+            break;
+        }
+        for (int i = 0; i < n; i++) accept_and_dispatch(el->fired[i].fd);
+    }
+    el_destroy(el);
+}
 
-        struct sockaddr_storage lsa;
-        socklen_t lsalen = sizeof(lsa);
-        if (getsockname(fd, (struct sockaddr *)&lsa, &lsalen) != 0 ||
-            !format_sockaddr(&lsa, client->laddr, sizeof(client->laddr)))
-            snprintf(client->laddr, sizeof(client->laddr), "%s:0", g_config.unix_socket_path);
+/* ── client setup (worker thread) ───────────────────────────────────── */
+/* Takes over a client fd the main thread accepted and counted for this
+ * worker. */
+static void client_attach(Worker *w, int fd) {
+    if (fd < 0 || fd >= g_config.max_connection) return; /* main never sends these */
+    ClientConn *client = calloc(1, sizeof(ClientConn));
+    if (!client) {
+        close(fd);
+        atomic_fetch_sub_explicit(&w->client_count, 1, memory_order_relaxed);
+        return;
+    }
+    client->fd = fd;
+    client->db = g_config.db;
+    client->state = CS_READING_HDR;
+    client->resp = 2;
+    client->id = atomic_fetch_add(&g_next_client_id, 1) + 1;
+    client->connect_time = client->last_interaction = time(NULL);
+    client->multi_count = -1;
+
+    struct sockaddr_storage sa;
+    socklen_t salen = sizeof(sa);
+    if (getpeername(fd, (struct sockaddr *)&sa, &salen) != 0) sa.ss_family = AF_UNSPEC;
+    if (!format_sockaddr(&sa, client->addr, sizeof(client->addr)))
+        snprintf(client->addr, sizeof(client->addr), "%s:0", g_config.unix_socket_path);
+
+    struct sockaddr_storage lsa;
+    socklen_t lsalen = sizeof(lsa);
+    if (getsockname(fd, (struct sockaddr *)&lsa, &lsalen) != 0 ||
+        !format_sockaddr(&lsa, client->laddr, sizeof(client->laddr)))
+        snprintf(client->laddr, sizeof(client->laddr), "%s:0", g_config.unix_socket_path);
 
 #ifdef USE_TLS
-        if (g_config.tls_enabled && g_ssl_ctx) {
-            client->ssl = SSL_new(g_ssl_ctx);
-            SSL_set_fd(client->ssl, fd);
-            int rc;
-            do {
-                rc = SSL_accept(client->ssl);
-            } while (rc <= 0 && SSL_get_error(client->ssl, rc) == SSL_ERROR_WANT_READ);
-            if (rc <= 0) {
-                ERR_print_errors_fp(stderr);
-                SSL_free(client->ssl);
-                close(fd);
-                free(client);
-                continue;
-            }
+    if (g_config.tls_enabled && g_ssl_ctx) {
+        client->ssl = SSL_new(g_ssl_ctx);
+        SSL_set_fd(client->ssl, fd);
+        int rc;
+        do {
+            rc = SSL_accept(client->ssl);
+        } while (rc <= 0 && SSL_get_error(client->ssl, rc) == SSL_ERROR_WANT_READ);
+        if (rc <= 0) {
+            ERR_print_errors_fp(stderr);
+            SSL_free(client->ssl);
+            close(fd);
+            free(client);
+            atomic_fetch_sub_explicit(&w->client_count, 1, memory_order_relaxed);
+            return;
         }
+    }
 #endif
 
-        if (sa.ss_family == AF_INET || sa.ss_family == AF_INET6) {
-            printf("[worker %d] client connected: %s  fd=%d%s\n", w->thread_id, client->addr, fd,
-                   g_config.tls_enabled ? "  (TLS)" : "");
-        } else {
-            printf("[worker %d] client connected: unix socket  fd=%d\n", w->thread_id, fd);
-        }
-        w->client_map[fd] = client;
-        atomic_fetch_add_explicit(&w->client_count, 1, memory_order_relaxed);
-        fd_watch(w, fd, EL_READABLE);
+    if (sa.ss_family == AF_INET || sa.ss_family == AF_INET6) {
+        printf("[worker %d] client connected: %s  fd=%d%s\n", w->thread_id, client->addr, fd,
+               g_config.tls_enabled ? "  (TLS)" : "");
+    } else {
+        printf("[worker %d] client connected: unix socket  fd=%d\n", w->thread_id, fd);
+    }
+    w->client_map[fd] = client;
+    fd_watch(w, fd, EL_READABLE);
+}
+
+/* Drains the handoff pipe. Every write to it is one whole int (atomic,
+ * below PIPE_BUF), so reads always come back in whole ints. */
+static void handoff_drain(Worker *w) {
+    int fds[256];
+    for (;;) {
+        ssize_t r = read(w->handoff_r, fds, sizeof(fds));
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return;
+        for (int i = 0; i < (int)(r / (ssize_t)sizeof(int)); i++) client_attach(w, fds[i]);
     }
 }
 
@@ -187,17 +266,20 @@ static void *worker_thread(void *arg) {
     w->input_ready_len = 0;
     if (!w->client_map || !w->backend_map || !w->fd_mask || !w->input_ready) {
         fprintf(stderr, "out of memory allocating connection tables (max_connection=%d)\n", g_config.max_connection);
+        atomic_store_explicit(&w->handoff_ready, -1, memory_order_release);
         return worker_failed();
     }
     pthread_mutex_init(&w->db_lock, NULL);
     atomic_store_explicit(&w->stats_ready, 1, memory_order_release);
     if (!w->el) {
         fprintf(stderr, "el_create failed\n");
+        atomic_store_explicit(&w->handoff_ready, -1, memory_order_release);
         return worker_failed();
     }
 
-    if (g_tcp_fd >= 0) fd_watch(w, g_tcp_fd, EL_READABLE);
-    if (g_unix_fd >= 0) fd_watch(w, g_unix_fd, EL_READABLE);
+    /* Clients arrive from the main thread's accept_loop() through this
+     * pipe; the listen sockets themselves are only watched there. */
+    fd_watch(w, w->handoff_r, EL_READABLE);
 
     /* The wake pipe main() made, so the topology refresh thread can pull
      * this worker straight out of el_poll(-1) the moment it publishes a
@@ -222,6 +304,7 @@ static void *worker_thread(void *arg) {
     worker_sync_topology(w);
 
     db_group_get(w, g_config.db);
+    atomic_store_explicit(&w->handoff_ready, 1, memory_order_release);
 
     while (1) {
         /* Don't block while some client still has pipelined commands queued
@@ -232,8 +315,8 @@ static void *worker_thread(void *arg) {
         for (int i = 0; i < n; i++) {
             int fd = w->el->fired[i].fd;
             int mask = w->el->fired[i].mask;
-            if (fd == g_tcp_fd || fd == g_unix_fd) {
-                do_accept(w, fd);
+            if (fd == w->handoff_r) {
+                handoff_drain(w);
                 continue;
             }
             if (fd == w->wake_r) {
@@ -357,6 +440,16 @@ int main(int argc, char **argv) {
     printf("Starting %d worker thread(s)...\n\n", nw);
 
     for (int i = 0; i < nw; i++) {
+        /* Before the thread starts, so it's there for worker_thread() to
+         * watch and for accept_loop() to write to. */
+        int hfds[2];
+        if (pipe(hfds) != 0) {
+            perror("pipe(handoff)");
+            exit(1);
+        }
+        set_nonblocking(hfds[0]);
+        g_workers[i].handoff_r = hfds[0];
+        g_workers[i].handoff_w = hfds[1];
         g_workers[i].thread_id = i;
         pthread_create(&g_workers[i].tid, NULL, worker_thread, &g_workers[i]);
     }
@@ -368,6 +461,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "%d of %d worker thread(s) failed to start\n", failed, nw);
         exit(1);
     }
+
+    /* Wait for every worker to finish setting up (or fail) before taking
+     * clients, so the first ones aren't all piled onto whichever worker
+     * happened to be ready first. */
+    int ready = 0;
+    for (int i = 0; i < nw; i++) {
+        int st;
+        while ((st = atomic_load_explicit(&g_workers[i].handoff_ready, memory_order_acquire)) == 0) {
+            struct timespec ts = {0, 1000000};
+            nanosleep(&ts, NULL);
+        }
+        if (st == 1) ready++;
+    }
+    if (ready == 0) {
+        fprintf(stderr, "no worker thread started\n");
+        exit(1);
+    }
+
+    accept_loop();
     for (int i = 0; i < nw; i++) pthread_join(g_workers[i].tid, NULL);
     return 0;
 }
