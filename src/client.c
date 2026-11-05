@@ -164,6 +164,7 @@ void close_client(Worker *w, ClientConn *client) {
         client->sub_conn = NULL;
         pool_destroy_conn(w, sc);
     }
+    client_list_forget(client);
     acl_teardown_all(w, client);
     mux_client_release(client);
     client_unqueue_buffered_input(w, client);
@@ -943,10 +944,11 @@ static void client_process_input(Worker *w, ClientConn *client) {
     /* HELLO's AUTH/SETNAME clauses end the command, and resp_parse_header()
      * doesn't wait for the last argument's bytes -- read until the whole
      * (always small) command is in hbuf before dispatching it. PROXY and
-     * INFO parse all their arguments from hbuf too, so they need the same. */
+     * INFO parse all their arguments from hbuf too, so they need the same,
+     * and so does CLIENT (CLIENT LIST's filters). */
     /* A multiplexed single-key command is likewise sent whole from hbuf
      * (client_can_mux() made sure it fits). */
-    int need_whole = !strcmp(cmd, "HELLO") || !strcmp(cmd, "PROXY") || !strcmp(cmd, "INFO") ||
+    int need_whole = !strcmp(cmd, "HELLO") || !strcmp(cmd, "PROXY") || !strcmp(cmd, "INFO") || !strcmp(cmd, "CLIENT") ||
                      (client->mux_cmd && cls == CMD_CLASS_SINGLE_KEY);
     if (need_whole && client->hbuf_len < total_cmd_len) {
         /* Too big to hold: reply with an error and skip the command's
@@ -996,6 +998,16 @@ static void client_process_input(Worker *w, ClientConn *client) {
                  : !strcmp(cmd, "PUNSUBSCRIBE") ? &client->psub_count
                                                 : &client->ssub_count;
         *n = (argc > 1 && *n > argc - 1) ? *n - (argc - 1) : 0;
+    }
+
+    if (client->in_subscribe && !strcmp(cmd, "CLIENT")) {
+        const char *sub;
+        int sublen;
+        if (resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen) && sublen == 4 &&
+            !strncasecmp(sub, "LIST", 4)) {
+            handle_subscribed_client_list(w, client);
+            return;
+        }
     }
 
     if (!strcmp(cmd, "AUTH")) {

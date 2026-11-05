@@ -257,10 +257,14 @@ struct ClientConn {
     int pbuf_len, pbuf_cap;
     int using_pbuf;
     FanoutCtx *fanout_ctx;
+    /* In-flight CLIENT LIST, waiting on other workers (see client_list.c). */
+    struct ClientListReq *list_req;
     PoolConn *sub_conn;
     /* 1 = an unsubscribe's fence PING is in flight on sub_conn (see
      * pubsub.c): client input is held until it comes back. */
     int sub_fence_pending;
+    /* Error to send once that fence is back (a subscribed CLIENT LIST). */
+    const char *sub_fence_error;
     /* ── CLIENT ID / GETNAME / SETNAME (see handle_client_cmd in fanout.c) ── */
     long long id;
     char name[64];
@@ -396,6 +400,15 @@ typedef struct {
     /* Clients currently connected to this worker, for INFO clients. Only
      * this worker writes it; INFO on any worker reads it. */
     atomic_int client_count;
+    /* CLIENT LIST requests from other workers waiting for this one's
+     * clients (inbox), and this worker's own requests every worker has
+     * answered (done), both under list_lock. list_ready is set while the
+     * wake pipe is watched, so other workers can hand requests to it (see
+     * client_list.c). */
+    pthread_mutex_t list_lock;
+    struct ClientListReq **list_inbox, *list_done;
+    int list_inbox_len, list_inbox_cap;
+    atomic_int list_ready;
 } Worker;
 
 typedef struct {
@@ -669,6 +682,7 @@ void handle_multikey_complete(Worker *w, ClientConn *client, const char *cmd);
 void handle_sub_conn_readable(Worker *w, PoolConn *conn);
 void handle_blocking_complete(Worker *w, ClientConn *client, const char *cmd);
 void handle_pubsub_cmd(Worker *w, ClientConn *client, int cmdlen, const char *cmd, const char *key, int keylen);
+void handle_subscribed_client_list(Worker *w, ClientConn *client);
 void handle_pubsub_inspect_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_slowlog_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_commandlog_cmd(Worker *w, ClientConn *client, int cmdlen);
@@ -677,6 +691,12 @@ void handle_script_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_function_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_command_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen);
+/* CLIENT INFO's flags field, P for a subscribed client as on Valkey; CLIENT
+ * LIST's FLAGS filter matches against it. */
+static inline const char *client_info_flags(const ClientConn *c) {
+    return c->sub_count + c->psub_count + c->ssub_count > 0 ? "P" : "N";
+}
+int format_client_info_line(Worker *w, ClientConn *client, char *out, int cap);
 int client_name_check(Worker *w, ClientConn *client, const char *name, int namelen);
 int client_set_name(Worker *w, ClientConn *client, const char *name, int namelen);
 void send_multibulk_reply(Worker *w, ClientConn *client, const char **lines, int n);
@@ -689,6 +709,13 @@ void fanout_send_response(Worker *w, ClientConn *client, char *resp, int resp_le
 void fanout_to_nodes(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *cmd_buf, int cmd_len,
                      const int *targets, int ntargets);
 
+/* ── CLIENT LIST (see src/client_list.c) ────────────────────────────── */
+typedef struct ClientListReq ClientListReq;
+void handle_client_list(Worker *w, ClientConn *client);
+void client_list_service(Worker *w);
+void client_list_forget(ClientConn *client);
+void client_list_stop(Worker *w);
+
 /* ── proxy-local commands (see src/metrics.c) ───────────────────────── */
 void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen);
 /* Appends the "# Pools" section that PROXY POOLS returns. 0 on success,
@@ -697,6 +724,7 @@ int proxy_pools_append(Worker *w, GrowBuf *g);
 
 /* ── INFO (see src/info.c) ──────────────────────────────────────────── */
 void info_init(const char *argv0, const char *conf_path);
+char *wrap_text_reply(int resp3, const char *text, int len, int *out_len);
 /* A module the backends have loaded, as HELLO reports it. */
 #define MAX_BACKEND_MODULES 32
 typedef struct {

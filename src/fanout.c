@@ -2655,9 +2655,8 @@ void send_multibulk_reply(Worker *w, ClientConn *client, const char **lines, int
 }
 
 /* Formats the CLIENT INFO line for `client` into `out` (capacity `cap`),
- * returning its length. Kept as a standalone helper so CLIENT LIST could
- * reuse it per-connection in the future. */
-static int format_client_info_line(Worker *w, ClientConn *client, char *out, int cap) {
+ * returning its length. CLIENT LIST uses it too (see client_list.c). */
+int format_client_info_line(Worker *w, ClientConn *client, char *out, int cap) {
     time_t now = time(NULL);
     char events[3];
     int ei = 0;
@@ -2667,12 +2666,12 @@ static int format_client_info_line(Worker *w, ClientConn *client, char *out, int
     const char *user = client->acl_authenticated ? client->acl_user : "default";
 
     return snprintf(out, (size_t)cap,
-                    "id=%lld addr=%s laddr=%s fd=%d name=%s age=%lld idle=%lld flags=N db=%d "
+                    "id=%lld addr=%s laddr=%s fd=%d name=%s age=%lld idle=%lld flags=%s db=%d "
                     "sub=%d psub=%d ssub=%d multi=%d watch=%d events=%s cmd=%s user=%s resp=%d",
                     client->id, client->addr, client->laddr, client->fd, client->name,
-                    (long long)(now - client->connect_time), (long long)(now - client->last_interaction), client->db,
-                    client->sub_count, client->psub_count, client->ssub_count, client->multi_count, client->watch_count,
-                    events, client->last_cmd, user, client->resp);
+                    (long long)(now - client->connect_time), (long long)(now - client->last_interaction),
+                    client_info_flags(client), client->db, client->sub_count, client->psub_count, client->ssub_count,
+                    client->multi_count, client->watch_count, events, client->last_cmd, user, client->resp);
 }
 
 /* Validates a client name (CLIENT SETNAME / HELLO ... SETNAME) without
@@ -2840,6 +2839,13 @@ void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen) {
         client->hbuf_len = 0;
         client->state = CS_WRITING_RESP;
         fd_watch(w, client->fd, EL_WRITABLE);
+        return;
+    }
+
+    /* CLIENT LIST [options] — the proxy's own clients on every worker, one
+     * CLIENT INFO line each, answered locally (see client_list.c). */
+    if (!strcmp(subcmd, "LIST")) {
+        handle_client_list(w, client);
         return;
     }
 

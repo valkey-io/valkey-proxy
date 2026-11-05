@@ -474,6 +474,39 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     close(sub2);
     close(sub3);
 
+    /* With RESP3 sub_conns, a subscribed RESP2 client's CLIENT LIST is still
+     * refused rather than answered by the backend, and once it unsubscribes
+     * the proxy answers again */
+    {
+        int s2 = proxy_connect(host, port);
+        const char *p = "*2\r\n$9\r\nSUBSCRIBE\r\n$11\r\ntc:resp3:cl\r\n*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n";
+        int ok = s2 >= 0 && write(s2, p, strlen(p)) == (ssize_t)strlen(p);
+        n = ok ? read_raw_reply(s2, raw, sizeof(raw)) : -1;
+        int sub_ok = n > 0 && raw[0] == '*';
+        n = ok ? read_raw_reply(s2, raw, sizeof(raw)) : -1;
+        CHECK(sub_ok && n > 0 && !strncmp(raw, "-ERR Can't execute 'client|list'", 32),
+              "RESP2 subscriber on a RESP3 sub_conn: CLIENT LIST refused", pass, fail);
+        n = ok ? resp_send_raw_reply(s2, raw, sizeof(raw), 2, "UNSUBSCRIBE", "tc:resp3:cl") : -1;
+        n = ok ? resp_send_raw_reply(s2, raw, sizeof(raw), 4, "CLIENT", "LIST", "ID", "999999999") : -1;
+        CHECK(n > 0 && !strcmp(raw, "$0\r\n\r\n"), "RESP2 client after UNSUBSCRIBE: proxy answers CLIENT LIST again",
+              pass, fail);
+        if (s2 >= 0) close(s2);
+
+        int s3 = proxy_connect(host, port);
+        if (s3 >= 0) {
+            resp_send_raw_reply(s3, raw, sizeof(raw), 2, "HELLO", "3");
+            resp_send_raw_reply(s3, raw, sizeof(raw), 2, "SUBSCRIBE", "tc:resp3:cl");
+            n = resp_send_raw_reply(s3, raw, sizeof(raw), 2, "CLIENT", "LIST");
+            CHECK(n > 0 && strstr(raw, "-ERR CLIENT LIST is not supported while subscribed"),
+                  "RESP3 subscriber: CLIENT LIST refused, not the backend's list", pass, fail);
+            close(s3);
+        }
+    }
+
+    /* CLIENT LIST is a verbatim string over RESP3, like Valkey */
+    n = resp_send_raw_reply(fd3, raw, sizeof(raw), 4, "CLIENT", "LIST", "ID", "999999999");
+    CHECK(n > 0 && !strcmp(raw, "=4\r\ntxt:\r\n"), "CLIENT LIST: verbatim string over RESP3", pass, fail);
+
     /* ── cleanup ──────────────────────────────────────────────────────── */
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:k1");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:hash");

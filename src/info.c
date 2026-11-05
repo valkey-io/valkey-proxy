@@ -478,9 +478,9 @@ static int append_keyspace(GrowBuf *g, FanoutCtx *ctx) {
 }
 
 /* ── reply assembly ─────────────────────────────────────────────────── */
-/* Wraps INFO text as the reply Valkey itself sends: a bulk string, or a
- * verbatim "txt" string for a RESP3 client. */
-static char *wrap_info_reply(int resp3, const char *text, int len, int *out_len) {
+/* Wraps text (INFO, CLIENT LIST) as the reply Valkey itself sends: a bulk
+ * string, or a verbatim "txt" string for a RESP3 client. */
+char *wrap_text_reply(int resp3, const char *text, int len, int *out_len) {
     GrowBuf g = {0};
     int rc = resp3 ? gb_append_fmt(&g, "=%d\r\ntxt:", len + 4) : gb_append_fmt(&g, "$%d\r\n", len);
     if (rc == 0) rc = gb_append(&g, text, len);
@@ -524,7 +524,7 @@ static char *build_info(Worker *w, ClientConn *client, uint32_t mask, FanoutCtx 
             default: rc = ctx ? append_shards_section(w, &g, ctx, sec) : -1; break;
         }
     }
-    char *reply = rc == 0 ? wrap_info_reply(client->resp == 3, g.len ? g.buf : "", g.len, out_len) : NULL;
+    char *reply = rc == 0 ? wrap_text_reply(client->resp == 3, g.len ? g.buf : "", g.len, out_len) : NULL;
     free(g.buf);
     return reply;
 }
