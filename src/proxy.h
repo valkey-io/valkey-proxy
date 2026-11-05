@@ -397,8 +397,12 @@ typedef struct {
      * PROXY POOLS on another worker knows it's safe to walk this one's
      * pools (see src/metrics.c). */
     atomic_int stats_ready;
-    /* Clients currently connected to this worker, for INFO clients. Only
-     * this worker writes it; INFO on any worker reads it. */
+    /* Clients assigned to this worker, for INFO clients/proxy and for the
+     * main thread's least-connections pick (see accept_loop() in
+     * valkey-proxy.c). The main thread adds 1 when it hands a client over --
+     * before the worker has even seen it, so a burst of connects spreads out
+     * instead of all landing on the same least-loaded worker -- and the
+     * worker subtracts 1 when the client closes or fails to set up. */
     atomic_int client_count;
     /* CLIENT LIST requests from other workers waiting for this one's
      * clients (inbox), and this worker's own requests every worker has
@@ -409,6 +413,17 @@ typedef struct {
     struct ClientListReq **list_inbox, *list_done;
     int list_inbox_len, list_inbox_cap;
     atomic_int list_ready;
+    /* Highest client_count this worker has reached since startup, for INFO
+     * proxy. Only the main thread writes it. */
+    atomic_int client_peak;
+    /* Pipe the main thread passes accepted client fds through, one int per
+     * write (atomic, below PIPE_BUF). Created by main() before the worker
+     * starts; read end non-blocking and watched by the worker, write end
+     * blocking so a worker that falls far behind back-pressures accept. */
+    int handoff_r, handoff_w;
+    /* 0 until worker_thread() is watching handoff_r (1) or has given up
+     * during setup (-1); the main thread hands this worker nothing until 1. */
+    atomic_int handoff_ready;
 } Worker;
 
 typedef struct {

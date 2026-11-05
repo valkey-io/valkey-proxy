@@ -1,5 +1,7 @@
 #include "proxy.h"
 #include <netdb.h>
+#include <netinet/tcp.h>
+#include <poll.h>
 
 #define DEFAULT_BACKEND_CONNECT_TIMEOUT_MS 1000
 #define DEFAULT_SHARED_CONNECTION_PER_NODE 4
@@ -184,11 +186,15 @@ static int tcp_connect_ipv4(const char *ip, int port, int timeout_ms) {
     }
 
     if (ret != 0) {
-        fd_set wset;
-        FD_ZERO(&wset);
-        FD_SET(fd, &wset);
-        struct timeval tv = {timeout_ms / 1000, (timeout_ms % 1000) * 1000};
-        if (select(fd + 1, NULL, &wset, NULL, &tv) <= 0) {
+        /* poll(), not select(): fd_set only holds fds below FD_SETSIZE
+         * (1024), and with enough clients connected this fd is above it --
+         * FD_SET would then abort under _FORTIFY_SOURCE (or write past
+         * the fd_set without it). */
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+        int pr;
+        do pr = poll(&pfd, 1, timeout_ms);
+        while (pr < 0 && errno == EINTR);
+        if (pr <= 0) {
             fprintf(stderr, "Could not connect to Valkey at %s:%d: Connection timed out\n", ip, port);
             close(fd);
             return -1;
@@ -206,6 +212,10 @@ static int tcp_connect_ipv4(const char *ip, int port, int timeout_ms) {
         }
     }
 
+    /* Pipelined commands sharing one backend connection go out as separate
+     * small writes; under Nagle each would wait for the previous one's ACK. */
+    int yes = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
     fcntl(fd, F_SETFL, flags);
     return fd;
 }

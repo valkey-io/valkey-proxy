@@ -81,7 +81,7 @@ Each section comes from one of three sources:
 | `cluster` | Proxy. Always `cluster_enabled:0` |
 | `keyspace` | Every master, summed per db (`avg_ttl` weighted by `expires`), so it agrees with `DBSIZE` |
 | `memory` `persistence` `stats` `commandstats` `errorstats` `latencystats` | Every master, listed per shard without merging |
-| `proxy` | Proxy. Workers, topology version, shard count, unmapped slots, and how many shards answered this reply (`info_shards_queried`/`_ok`/`_failed`) |
+| `proxy` | Proxy. Workers, topology version, shard count, unmapped slots, and how many shards answered this reply (`info_shards_queried`/`_ok`/`_failed`), and one `worker<i>:connected_clients=<n>,peak_connected_clients=<n>` line per worker (current clients and the most it has held since startup). The main thread accepts every client and hands it to the worker with the fewest, so these stay within one of each other unless clients disconnect unevenly |
 | `pools` | Proxy. Same as `PROXY POOLS` |
 
 In a per-shard section each shard starts with `shard<idx>:addr=<ip>:<port>,node_id=<id>,status=ok|error`

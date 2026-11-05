@@ -292,18 +292,24 @@ static int append_proxy(Worker *w, GrowBuf *g, int queried, int ok) {
     int unmapped = 0;
     for (int s = 0; s < CLUSTER_SLOTS; s++)
         if (w->topo.slot_map[s] < 0) unmapped++;
-    return gb_append_fmt(g,
-                         "# Proxy\r\n"
-                         "proxy_workers:%d\r\n"
-                         "proxy_topology_version:%d\r\n"
-                         "proxy_shards:%d\r\n"
-                         "proxy_unmapped_slots:%d\r\n"
-                         "proxy_cluster_refresh_interval_ms:%d\r\n"
-                         "info_shards_queried:%d\r\n"
-                         "info_shards_ok:%d\r\n"
-                         "info_shards_failed:%d\r\n",
-                         g_config.worker_thread_no, w->topo.version, w->topo.node_count, unmapped,
-                         g_config.cluster_refresh_interval_ms, queried, ok, queried - ok);
+    int rc = gb_append_fmt(g,
+                           "# Proxy\r\n"
+                           "proxy_workers:%d\r\n"
+                           "proxy_topology_version:%d\r\n"
+                           "proxy_shards:%d\r\n"
+                           "proxy_unmapped_slots:%d\r\n"
+                           "proxy_cluster_refresh_interval_ms:%d\r\n"
+                           "info_shards_queried:%d\r\n"
+                           "info_shards_ok:%d\r\n"
+                           "info_shards_failed:%d\r\n",
+                           g_config.worker_thread_no, w->topo.version, w->topo.node_count, unmapped,
+                           g_config.cluster_refresh_interval_ms, queried, ok, queried - ok);
+    /* Per-worker client counts, to see how evenly accept() spread them. */
+    for (int i = 0; i < g_config.worker_thread_no && rc == 0; i++)
+        rc = gb_append_fmt(g, "worker%d:connected_clients=%d,peak_connected_clients=%d\r\n", i,
+                           atomic_load_explicit(&g_workers[i].client_count, memory_order_relaxed),
+                           atomic_load_explicit(&g_workers[i].client_peak, memory_order_relaxed));
+    return rc;
 }
 
 /* ── shard replies ──────────────────────────────────────────────────── */
