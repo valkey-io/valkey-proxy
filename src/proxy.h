@@ -399,7 +399,7 @@ typedef struct {
 } Worker;
 
 typedef struct {
-    char server_ip[64];
+    char server_ip[254]; /* IPv4 address or DNS hostname (up to 253 characters). */
     int server_port;
     char bind_ip[64];
     int proxy_port;

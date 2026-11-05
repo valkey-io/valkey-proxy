@@ -74,6 +74,12 @@ $(TEST_OBJS): $(BUILD_DIR)/%.o: %.c
 # Usage: make test && ./run-test -h=<host> -p=<port>
 test: run-test
 
+# Standalone configuration/network tests; no running Valkey cluster required.
+test-config:
+	@mkdir -p $(BUILD_DIR)/test
+	$(TEST_CC) $(TEST_CFLAGS) -Isrc -o $(BUILD_DIR)/test/test_config test/test_config.c src/config.c
+	$(BUILD_DIR)/test/test_config
+
 clean:
 	rm -f $(POOL_TARGET) run-test
 	rm -rf $(BUILD_DIR)
@@ -87,5 +93,5 @@ format:
 format-check:
 	clang-format --dry-run --Werror $(FORMAT_SRCS)
 
-.PHONY: clean test format format-check
+.PHONY: clean test test-config format format-check
 
