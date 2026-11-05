@@ -1,5 +1,6 @@
 #include "proxy.h"
 #include <netdb.h>
+#include <netinet/tcp.h>
 
 #define DEFAULT_BACKEND_CONNECT_TIMEOUT_MS 1000
 #define DEFAULT_SHARED_CONNECTION_PER_NODE 4
@@ -206,6 +207,10 @@ static int tcp_connect_ipv4(const char *ip, int port, int timeout_ms) {
         }
     }
 
+    /* Pipelined commands sharing one backend connection go out as separate
+     * small writes; under Nagle each would wait for the previous one's ACK. */
+    int yes = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
     fcntl(fd, F_SETFL, flags);
     return fd;
 }
