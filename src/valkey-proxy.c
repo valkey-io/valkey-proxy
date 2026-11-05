@@ -196,24 +196,13 @@ static void *worker_thread(void *arg) {
         w->wake_r = w->wake_w = -1;
     }
 
-    /* Seed this worker's topology snapshot from the global state before the
-     * first db_group_create() reads it (fetch_cluster_nodes() has already
-     * populated the globals by the time worker threads are spawned -- see
-     * main()). No lock needed here: at this point the refresh thread may
-     * already be running, but pthread_create()'s happens-before guarantee
-     * plus the fact that a torn read here only means this worker starts
-     * from a topology that's at most one refresh cycle stale (it'll pick up
-     * the rest on its first worker_sync_topology() call) makes a plain
-     * rdlock'd copy sufficient. */
-    pthread_rwlock_rdlock(&g_topology_lock);
-    memcpy(w->topo.nodes, g_nodes, sizeof(w->topo.nodes));
-    memcpy(w->topo.node_gen, g_node_gen, sizeof(w->topo.node_gen));
-    memcpy(w->topo.node_has_slots, g_node_has_slots, sizeof(w->topo.node_has_slots));
-    memcpy(w->topo.slot_map, g_slot_map, sizeof(w->topo.slot_map));
-    w->topo.node_count = g_node_count;
-    w->topo.version = atomic_load_explicit(&g_topology_version, memory_order_acquire);
-    pthread_rwlock_unlock(&g_topology_lock);
-    w->topology_version_seen = w->topo.version;
+    /* Seed this worker's topology snapshot before the first db_group_get()
+     * reads it (fetch_cluster_nodes() has already populated the globals by
+     * the time worker threads are spawned -- see main()). db_group_count is
+     * still 0 here, so inside worker_sync_topology() only the snapshot copy
+     * runs; pool reconciliation waits for the first event-loop wakeup that
+     * sees a newer g_topology_version. */
+    worker_sync_topology(w);
 
     db_group_get(w, g_config.db);
 
