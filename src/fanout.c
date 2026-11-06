@@ -2919,6 +2919,49 @@ void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen) {
     client->hbuf_len = 0;
 }
 
+/* CLUSTER — only KEYSLOT is supported, answered locally with key_slot()
+ * (cluster.c). Every other subcommand gets the same error as any other
+ * unsupported command and never reaches a backend. */
+void handle_cluster_cmd(Worker *w, ClientConn *client, int cmdlen) {
+    (void)cmdlen;
+    const char *sub;
+    int sublen;
+    if (!resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen) || sublen != 7 ||
+        strncasecmp(sub, "KEYSLOT", 7) != 0) {
+        client_send_error(w, client, "unsupport command");
+        client->hbuf_len = 0;
+        return;
+    }
+
+    const char *key, *extra;
+    int keylen, extralen;
+    if (!resp_get_nth_arg(client->hbuf, client->hbuf_len, 2, &key, &keylen) ||
+        resp_get_nth_arg(client->hbuf, client->hbuf_len, 3, &extra, &extralen)) {
+        client_send_error(w, client, "wrong number of arguments for 'cluster|keyslot' command");
+        client->hbuf_len = 0;
+        return;
+    }
+
+    char reply[16];
+    int reply_len = snprintf(reply, sizeof(reply), ":%d\r\n", key_slot(key, keylen));
+    if (client->wbuf_cap < reply_len) {
+        char *tmp = realloc(client->wbuf, (size_t)reply_len);
+        if (!tmp) {
+            client_send_error(w, client, "oom");
+            client->hbuf_len = 0;
+            return;
+        }
+        client->wbuf = tmp;
+        client->wbuf_cap = reply_len;
+    }
+    memcpy(client->wbuf, reply, (size_t)reply_len);
+    client->wbuf_len = reply_len;
+    client->wbuf_off = 0;
+    client->hbuf_len = 0;
+    client->state = CS_WRITING_RESP;
+    fd_watch(w, client->fd, EL_WRITABLE);
+}
+
 void handle_script_cmd(Worker *w, ClientConn *client, int cmdlen) {
     (void)cmdlen;
     const char *sub;
@@ -3564,9 +3607,13 @@ void handle_command_cmd(Worker *w, ClientConn *client, int cmdlen) {
     client->hbuf_len = 0;
 }
 
-void handle_nokey_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen) {
+void handle_noslot_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen) {
     if (!strcmp(cmd, "CLIENT")) {
         handle_client_cmd(w, client, cmdlen);
+        return;
+    }
+    if (!strcmp(cmd, "CLUSTER")) {
+        handle_cluster_cmd(w, client, cmdlen);
         return;
     }
     if (!strcmp(cmd, "PUBSUB")) {
