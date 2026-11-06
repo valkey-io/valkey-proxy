@@ -3607,7 +3607,7 @@ void handle_command_cmd(Worker *w, ClientConn *client, int cmdlen) {
     client->hbuf_len = 0;
 }
 
-void handle_nokey_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen) {
+void handle_noslot_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen) {
     if (!strcmp(cmd, "CLIENT")) {
         handle_client_cmd(w, client, cmdlen);
         return;

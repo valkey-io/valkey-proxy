@@ -2,7 +2,7 @@
 
 const char *POOL_NAME[POOL_TYPE_COUNT] = {"normal", "blocking", "subscription", "transaction", "acl", "shared"};
 
-const char *CMD_CLASS_NAME[] = {"SINGLE_KEY", "MULTI_KEY", "NO_KEY", "BLOCKING", "PUBSUB", "ACL"};
+const char *CMD_CLASS_NAME[] = {"SINGLE_KEY", "MULTI_KEY", "NO_SLOT", "BLOCKING", "PUBSUB", "ACL"};
 
 /* ── supported command lists ────────────────────────────────────────── */
 static const char *NON_TXN_CMDS[] = {"ACL",
@@ -393,11 +393,14 @@ static const char *MULTI_KEY_CMDS[] = {"BITOP",
                                        NULL};
 static const char *FANOUT_CMDS[] = {"DEL",  "EXISTS", "JSON.MGET", "JSON.MSET", "LCS", "MGET",
                                     "MSET", "MSETEX", "TOUCH",     "UNLINK",    NULL};
-static const char *NO_KEY_CMDS[] = {"CLIENT",   "CLUSTER",   "COMMAND",  "COMMANDLOG",   "DBSIZE",    "ECHO",
-                                    "FLUSHALL", "FLUSHDB",   "FT._LIST", "FT.AGGREGATE", "FT.CREATE", "FT.DROPINDEX",
-                                    "FT.INFO",  "FT.SEARCH", "FUNCTION", "HELLO",        "INFO",      "KEYS",
-                                    "LOLWUT",   "MODULE",    "PING",     "PROXY",        "PUBSUB",    "RANDOMKEY",
-                                    "SCAN",     "SCRIPT",    "SELECT",   "SLOWLOG",      "TIME",      NULL};
+/* Commands not routed by key slot: answered by the proxy itself, broadcast
+ * to every primary, or forwarded to an arbitrary node. Some take arguments
+ * that look like keys (e.g. CLUSTER KEYSLOT) but are never used for routing. */
+static const char *NO_SLOT_CMDS[] = {"CLIENT",   "CLUSTER",   "COMMAND",  "COMMANDLOG",   "DBSIZE",    "ECHO",
+                                     "FLUSHALL", "FLUSHDB",   "FT._LIST", "FT.AGGREGATE", "FT.CREATE", "FT.DROPINDEX",
+                                     "FT.INFO",  "FT.SEARCH", "FUNCTION", "HELLO",        "INFO",      "KEYS",
+                                     "LOLWUT",   "MODULE",    "PING",     "PROXY",        "PUBSUB",    "RANDOMKEY",
+                                     "SCAN",     "SCRIPT",    "SELECT",   "SLOWLOG",      "TIME",      NULL};
 
 /* Commands whose RESP2 reply has a nil *array* rather than a nil bulk
  * string somewhere in it -- see resp3_downgrade()'s nil_array_depth
@@ -488,7 +491,7 @@ CmdClass classify_command(const char *cmd, PoolType pt) {
     if (pt == POOL_ACL) return CMD_CLASS_ACL;
     for (int i = 0; MULTI_KEY_CMDS[i]; i++)
         if (!strcmp(cmd, MULTI_KEY_CMDS[i])) return CMD_CLASS_MULTI_KEY;
-    for (int i = 0; NO_KEY_CMDS[i]; i++)
-        if (!strcmp(cmd, NO_KEY_CMDS[i])) return CMD_CLASS_NO_KEY;
+    for (int i = 0; NO_SLOT_CMDS[i]; i++)
+        if (!strcmp(cmd, NO_SLOT_CMDS[i])) return CMD_CLASS_NO_SLOT;
     return CMD_CLASS_SINGLE_KEY;
 }

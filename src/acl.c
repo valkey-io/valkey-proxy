@@ -6,7 +6,7 @@
  * key-based blocking commands stop using the shared per-node pools and
  * instead use a connection that's exclusively theirs and already AUTH'd as
  * that user (lazily opened the first time that client's traffic touches a
- * given node -- see acl_route_business_cmd()). Fan-out/no-key commands,
+ * given node -- see acl_route_business_cmd()). Fan-out/no-slot commands,
  * pub/sub, and transactions are out of scope and keep using the default
  * identity via the shared pools even for an ACL-authenticated client.
  *

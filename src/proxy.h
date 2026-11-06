@@ -70,7 +70,7 @@ typedef enum {
 typedef enum {
     CMD_CLASS_SINGLE_KEY = 0,
     CMD_CLASS_MULTI_KEY,
-    CMD_CLASS_NO_KEY,
+    CMD_CLASS_NO_SLOT,
     CMD_CLASS_BLOCKING,
     CMD_CLASS_PUBSUB,
     CMD_CLASS_ACL,
@@ -689,7 +689,7 @@ void fanout_aggregate_and_reply(Worker *w, FanoutCtx *ctx);
 /* A multiplexed fan-out sub's reply (buf == NULL: it failed). */
 void fanout_sub_complete(Worker *w, FanoutSub *sub, const char *buf, int len, int backend_resp3);
 void handle_fanout_cmd(Worker *w, ClientConn *client, const char *cmd);
-void handle_nokey_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen);
+void handle_noslot_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdlen);
 void handle_scan_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_multikey_complete(Worker *w, ClientConn *client, const char *cmd);
 

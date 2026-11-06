@@ -1224,11 +1224,11 @@ static void client_process_input(Worker *w, ClientConn *client) {
         if (rlen > 0) {
             handle_blocking_complete(w, client, cmd);
         }
-    } else if (cls == CMD_CLASS_NO_KEY) {
+    } else if (cls == CMD_CLASS_NO_SLOT) {
         if (!strcmp(cmd, "SCAN"))
             handle_scan_cmd(w, client, total_cmd_len);
         else
-            handle_nokey_cmd(w, client, cmd, total_cmd_len);
+            handle_noslot_cmd(w, client, cmd, total_cmd_len);
     } else if (cls == CMD_CLASS_PUBSUB) {
         handle_pubsub_cmd(w, client, total_cmd_len, cmd, key, keylen);
     } else if (cls == CMD_CLASS_ACL) {
