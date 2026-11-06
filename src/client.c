@@ -949,7 +949,7 @@ static void client_process_input(Worker *w, ClientConn *client) {
     /* A multiplexed single-key command is likewise sent whole from hbuf
      * (client_can_mux() made sure it fits). */
     int need_whole = !strcmp(cmd, "HELLO") || !strcmp(cmd, "PROXY") || !strcmp(cmd, "INFO") || !strcmp(cmd, "CLIENT") ||
-                     (client->mux_cmd && cls == CMD_CLASS_SINGLE_KEY);
+                     !strcmp(cmd, "CLUSTER") || (client->mux_cmd && cls == CMD_CLASS_SINGLE_KEY);
     if (need_whole && client->hbuf_len < total_cmd_len) {
         /* Too big to hold: reply with an error and skip the command's
          * bytes, so the connection and anything pipelined after it survive. */

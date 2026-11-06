@@ -418,6 +418,12 @@ These commands require the Search module (valkey-search) to be loaded on every b
 | `FT.SEARCH` | Forwarded to one primary node |
 | `FT._LIST` | Forwarded to one primary node |
 
+### Cluster Management
+
+| Command | Notes |
+|---|---|
+| `CLUSTER KEYSLOT` | Answered by proxy. Other `CLUSTER` subcommands are still unsupported |
+
 ## Unsupported commands
 
 | Command | Notes |
@@ -438,7 +444,6 @@ These commands require the Search module (valkey-search) to be loaded on every b
 | `CLUSTER GETSLOTMIGRATIONS` | |
 | `CLUSTER HELP` | |
 | `CLUSTER INFO` | |
-| `CLUSTER KEYSLOT` | |
 | `CLUSTER LINKS` | |
 | `CLUSTER MEET` | |
 | `CLUSTER MIGRATESLOTS` | |

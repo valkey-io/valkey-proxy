@@ -6,7 +6,7 @@ typedef struct {
     int ok;
     const char *label;
 } _GnRes;
-#define _GN_MAX 200
+#define _GN_MAX 256
 
 #undef CHECK
 #define CHECK(cond, _lbl, pass, fail) \
@@ -788,6 +788,37 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
     /* LOLWUT has no key — routed to a single arbitrary master node */
     proxy_cmd(fd, r, sizeof(r), 1, "LOLWUT");
     CHECK(r[0] != '-', "LOLWUT: returns a reply (not an error)", pass, fail);
+
+    /* ── CLUSTER KEYSLOT ─────────────────────────────────────────────── */
+    /* Answered by the proxy with the same CRC16/hashtag rule as Valkey;
+     * every other CLUSTER subcommand is still unsupported */
+    proxy_cmd(fd, r, sizeof(r), 3, "CLUSTER", "KEYSLOT", "somekey");
+    CHECK(strcmp(r, ":11058") == 0, "CLUSTER KEYSLOT somekey: returns 11058", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 3, "CLUSTER", "KEYSLOT", "foo");
+    CHECK(strcmp(r, ":12182") == 0, "CLUSTER KEYSLOT foo: returns 12182", pass, fail);
+    {
+        char a[64], b[64];
+        proxy_cmd(fd, a, sizeof(a), 3, "CLUSTER", "KEYSLOT", "{user1000}.following");
+        proxy_cmd(fd, b, sizeof(b), 3, "CLUSTER", "KEYSLOT", "{user1000}.followers");
+        CHECK(a[0] == ':' && strcmp(a, b) == 0, "CLUSTER KEYSLOT: same hashtag gives the same slot", pass, fail);
+        proxy_cmd(fd, a, sizeof(a), 3, "CLUSTER", "KEYSLOT", "user1000");
+        proxy_cmd(fd, b, sizeof(b), 3, "CLUSTER", "KEYSLOT", "{user1000}.following");
+        CHECK(strcmp(a, b) == 0, "CLUSTER KEYSLOT: hashtag hashes only the tag", pass, fail);
+    }
+    proxy_cmd(fd, r, sizeof(r), 3, "CLUSTER", "KEYSLOT", "{}foo");
+    CHECK(strcmp(r, ":9500") == 0, "CLUSTER KEYSLOT {}foo: empty hashtag hashes the whole key", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 3, "cluster", "keyslot", "foo");
+    CHECK(strcmp(r, ":12182") == 0, "CLUSTER KEYSLOT: case-insensitive", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "CLUSTER", "KEYSLOT");
+    CHECK(r[0] == '-', "CLUSTER KEYSLOT: missing key returns an error", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 4, "CLUSTER", "KEYSLOT", "a", "b");
+    CHECK(r[0] == '-', "CLUSTER KEYSLOT: extra argument returns an error", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "CLUSTER", "NODES");
+    CHECK(strstr(r, "unsupport command") != NULL, "CLUSTER NODES: still unsupported", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "CLUSTER", "INFO");
+    CHECK(strstr(r, "unsupport command") != NULL, "CLUSTER INFO: still unsupported", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 1, "CLUSTER");
+    CHECK(strstr(r, "unsupport command") != NULL, "CLUSTER: no subcommand is unsupported", pass, fail);
 
     /* ── MODULE LIST ─────────────────────────────────────────────────── */
     /* MODULE LIST has no key — routed to a single arbitrary master node,

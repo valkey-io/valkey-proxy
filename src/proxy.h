@@ -706,6 +706,7 @@ void handle_script_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_function_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_command_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen);
+void handle_cluster_cmd(Worker *w, ClientConn *client, int cmdlen);
 /* CLIENT INFO's flags field, P for a subscribed client as on Valkey; CLIENT
  * LIST's FLAGS filter matches against it. */
 static inline const char *client_info_flags(const ClientConn *c) {
