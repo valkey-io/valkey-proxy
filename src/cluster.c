@@ -281,10 +281,11 @@ static void parse_cluster_nodes_into(const char *data, ClusterNode *out_nodes, i
  * fatal on failure). */
 static int fetch_cluster_nodes_from(const char *ip, int port, ClusterNode *out_nodes, int *out_count, int *out_slot) {
     /* Short timeout, not tcp_connect()'s fixed 5s: this runs every refresh
-     * cycle, and the seed configured in proxy.conf keeps getting retried
-     * first even after it's confirmed dead (see topology_refresh_loop()) --
-     * at 5s that alone would stretch every single cycle out to 5+ seconds,
-     * badly slowing down how fast a real failover gets noticed. */
+     * cycle, and a cycle where every candidate source is down (the
+     * last-good source, then each known node in turn) pays one timeout per
+     * candidate -- at 5s that would stretch a single cycle out to 5+ seconds
+     * per dead node, badly slowing down how fast a real failover gets
+     * noticed. */
     int fd = tcp_connect_timeout(ip, port, g_config.backend_connect_timeout_ms);
     if (fd < 0) return -1;
     ssize_t wn = write(fd, CLUSTER_NODES_CMD, strlen(CLUSTER_NODES_CMD));
@@ -568,6 +569,9 @@ static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const
 static void *topology_refresh_loop(void *arg) {
     (void)arg;
     int interval_ms = g_config.cluster_refresh_interval_ms;
+    char last_ip[sizeof(g_config.server_ip)];
+    snprintf(last_ip, sizeof(last_ip), "%s", g_config.server_ip);
+    int last_port = g_config.server_port;
     for (;;) {
         struct timespec ts;
         ts.tv_sec = interval_ms / 1000;
@@ -576,14 +580,9 @@ static void *topology_refresh_loop(void *arg) {
 
         ClusterNode dn[MAX_NODES];
         int dcount = 0, dslot[CLUSTER_SLOTS];
-        char used_ip[sizeof(g_config.server_ip)];
-        int used_port;
-        snprintf(used_ip, sizeof(used_ip), "%s", g_config.server_ip);
-        used_port = g_config.server_port;
-        int ok = fetch_cluster_nodes_from(used_ip, used_port, dn, &dcount, dslot);
-
+        int ok = fetch_cluster_nodes_from(last_ip, last_port, dn, &dcount, dslot);
         if (ok < 0) {
-            /* Seed unreachable: fall back to any node we already know about,
+            /* Last source unreachable: fall back to any node we already know about,
              * so a permanently-down seed doesn't stall refresh forever. */
             ClusterNode fallback[MAX_NODES];
             int fcount;
@@ -592,27 +591,28 @@ static void *topology_refresh_loop(void *arg) {
             memcpy(fallback, g_nodes, sizeof(fallback));
             pthread_rwlock_unlock(&g_topology_lock);
             for (int i = 0; i < fcount && ok < 0; i++) {
+                if (fallback[i].port == last_port && strcmp(fallback[i].ip, last_ip) == 0) continue;
                 ok = fetch_cluster_nodes_from(fallback[i].ip, fallback[i].port, dn, &dcount, dslot);
-                if (ok == 0) {
-                    snprintf(used_ip, sizeof(used_ip), "%s", fallback[i].ip);
-                    used_port = fallback[i].port;
+                if (ok == 0 && dcount > 0) {
+                    snprintf(last_ip, sizeof(last_ip), "%s", fallback[i].ip);
+                    last_port = fallback[i].port;
                 }
             }
         }
 
         if (ok < 0) {
-            fprintf(stderr, "[topology] refresh failed: seed and all known nodes unreachable, "
-                            "keeping last-known-good topology\n");
+            fprintf(stderr, "[topology] refresh failed: all known nodes "
+                            "unreachable, keeping last-known-good topology\n");
             continue;
         }
         if (dcount == 0) {
             fprintf(stderr,
                     "[topology] refresh returned 0 master(s) from %s:%d, ignoring "
                     "(keeping last-known-good topology)\n",
-                    used_ip, used_port);
+                    last_ip, last_port);
             continue;
         }
-        reconcile_and_publish(dn, dcount, dslot, used_ip, used_port);
+        reconcile_and_publish(dn, dcount, dslot, last_ip, last_port);
     }
     return NULL;
 }
