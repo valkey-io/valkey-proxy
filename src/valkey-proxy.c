@@ -179,6 +179,8 @@ static void client_attach(Worker *w, int fd) {
     client->id = atomic_fetch_add(&g_next_client_id, 1) + 1;
     client->connect_time = client->last_interaction = time(NULL);
     client->multi_count = -1;
+    client->txn_slot = client->txn_node = -1;
+    client->txn_replay_moved = -1;
 
     struct sockaddr_storage sa;
     socklen_t salen = sizeof(sa);

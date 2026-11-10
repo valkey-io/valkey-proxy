@@ -289,11 +289,11 @@ The list below covers every supported command.
 
 | Command | Notes |
 |---|---|
-| `DISCARD` | Planned |
-| `EXEC` | Planned |
-| `MULTI` | Planned |
-| `UNWATCH` | Planned |
-| `WATCH` | Planned |
+| `DISCARD` | Ends the transaction and releases its pinned connection. Without `MULTI`: `-ERR DISCARD without MULTI`. See [Transactions](FEATURES.md#8-transactions) |
+| `EXEC` | Runs on the transaction's node. `-EXECABORT` if any queued command was rejected; nil if a `WATCH`ed key changed or the connection holding the `WATCH` was lost. An empty transaction returns `*0` |
+| `MULTI` | Answered by the proxy; sent to the backend just before the first queued command. All keys in the transaction must hash to one slot, otherwise `-CROSSSLOT` and `EXEC` returns `-EXECABORT` |
+| `UNWATCH` | Outside `MULTI`, forwarded on the pinned connection, which is then released. Inside `MULTI`, queued like any other command |
+| `WATCH` | All keys must hash to one slot, the same slot as the rest of the transaction. Pins a backend connection until `EXEC`/`DISCARD`/`UNWATCH`. `WATCH` inside `MULTI`: `-ERR WATCH inside MULTI is not allowed` |
 
 ### Scripting and Functions
 

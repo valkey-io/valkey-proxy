@@ -133,7 +133,7 @@ of that command's routing decisions are based on the same layout.
 | `CS_DISCARDING_CMD` | Throwing away the rest of a rejected command (for example, one that is too large). |
 
 Commands typed as plain text (inline commands, like `PING` in telnet) are converted to the normal
-RESP format first.
+RESP format first. Any command can be sent this way; a line is at most 16KB.
 
 With pipelining, one read from the socket can contain several commands. Only the current command
 is kept in `hbuf`/`pbuf`; any bytes after it belong to later commands and wait in `qbuf` until their
@@ -269,5 +269,3 @@ Clients can use either version of the protocol, RESP2 or RESP3, and switch with 
   raise the operating system's open-file limit (`RLIMIT_NOFILE`) to match.
 - Periodic topology refresh is off by default (`cluster_refresh_interval_ms 0`). Without it, the
   proxy doesn't notice failovers or resharding until it's restarted.
-- `POOL_TRANSACTION` exists and its size can be configured, but `classify_command()` doesn't send
-  anything to it yet. See the note above `RESP3_NIL_ARRAY_DEPTH0_CMDS` in `cmd.c`.

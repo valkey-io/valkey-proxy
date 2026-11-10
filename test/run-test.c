@@ -18,6 +18,7 @@ void run_zset_tests(const char *host, int port, int *pass, int *fail);
 void run_bloomfilter_tests(const char *host, int port, int *pass, int *fail);
 void run_json_tests(const char *host, int port, int *pass, int *fail);
 void run_pubsub_tests(const char *host, int port, int *pass, int *fail);
+void run_transaction_tests(const char *host, int port, int *pass, int *fail);
 void run_acl_tests(const char *host, int port, int *pass, int *fail);
 void run_resp3_tests(const char *host, int port, int *pass, int *fail);
 void run_search_tests(const char *host, int port, int *pass, int *fail);
@@ -28,7 +29,7 @@ extern const char *g_test_acl_user;
 
 static void usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s [--bloomfilter] [--json] [--search] [--string] [--pubsub] [-h=<host>] [-p=<port>] "
+            "Usage: %s [--bloomfilter] [--json] [--search] [--string] [--pubsub] [--transaction] [-h=<host>] [-p=<port>] "
             "[--cluster=<host:port>] [--reported=<host:port>]\n",
             prog);
     fprintf(stderr, "  -h=<host>      proxy IP address (default: 127.0.0.1)\n");
@@ -44,6 +45,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --search       run Search (FT.*) module tests only\n");
     fprintf(stderr, "  --string       run String tests only\n");
     fprintf(stderr, "  --pubsub       run Pub/Sub tests only\n");
+    fprintf(stderr, "  --transaction  run transaction (MULTI / EXEC / WATCH) tests only\n");
     fprintf(stderr, "  (any of the suite options above runs only the selected suites, not the defaults)\n");
 }
 
@@ -55,6 +57,7 @@ int main(int argc, char *argv[]) {
     int run_search = 0;
     int run_string = 0;
     int run_pubsub = 0;
+    int run_transaction = 0;
     int run_defaults = 1;
     char cluster_seed[128] = "";
     char reported_host[64] = "";
@@ -87,6 +90,11 @@ int main(int argc, char *argv[]) {
         }
         if (strcmp(argv[i], "--pubsub") == 0) {
             run_pubsub = 1;
+            run_defaults = 0;
+            continue;
+        }
+        if (strcmp(argv[i], "--transaction") == 0) {
+            run_transaction = 1;
             run_defaults = 0;
             continue;
         }
@@ -126,6 +134,7 @@ int main(int argc, char *argv[]) {
         RUN_SUITE("zset", run_zset_tests);
         RUN_SUITE("blocking", run_blocking_tests);
         RUN_SUITE("pubsub", run_pubsub_tests);
+        RUN_SUITE("transaction", run_transaction_tests);
         RUN_SUITE("acl", run_acl_tests);
         if (reported_port) {
             p0 = pass;
@@ -160,6 +169,10 @@ int main(int argc, char *argv[]) {
 
     if (run_pubsub) {
         RUN_SUITE("pubsub", run_pubsub_tests);
+    }
+
+    if (run_transaction) {
+        RUN_SUITE("transaction", run_transaction_tests);
     }
 
     if (g_test_acl_user) test_acl_fixture_teardown();

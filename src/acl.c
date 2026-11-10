@@ -6,9 +6,10 @@
  * key-based blocking commands stop using the shared per-node pools and
  * instead use a connection that's exclusively theirs and already AUTH'd as
  * that user (lazily opened the first time that client's traffic touches a
- * given node -- see acl_route_business_cmd()). Fan-out/no-slot commands,
- * pub/sub, and transactions are out of scope and keep using the default
- * identity via the shared pools even for an ACL-authenticated client.
+ * given node -- see acl_route_business_cmd()). A transaction pins the
+ * connection of its node for its duration (see src/txn.c). Fan-out/no-slot
+ * commands and pub/sub are out of scope and keep using the default identity
+ * via the shared pools even for an ACL-authenticated client.
  *
  * "HELLO <ver> AUTH user pass" logs in the same way (see hello.c), but
  * atomically: its probe conn stays out of acl_conns[] until it succeeds,
@@ -524,6 +525,7 @@ void handle_acl_conn_readable(Worker *w, PoolConn *conn) {
 
         conn->rbuf_len = 0;
         if (is_login_probe) {
+            txn_identity_changed(w, cl);
             cl->acl_authenticated = 1;
             fd_unwatch(w, conn->fd, EL_READABLE);
             acl_reply_ok(w, cl);
