@@ -99,7 +99,11 @@ which can be a hostname) and records the result in the globals `g_nodes`, `g_slo
 
 If `cluster_refresh_interval_ms` is set, the refresh thread repeats this on a timer:
 
-- If the configured address doesn't answer, it tries every node it already knows.
+- It first asks the node that last answered with a usable layout. That starts out as the configured
+  address.
+- If that node doesn't answer, it tries every other node it already knows. The first one that
+  answers with a usable layout is asked first from then on, so a node that has gone down costs one
+  connect timeout, not one per refresh.
 - If no node answers, or the answer lists no primaries, it keeps using the last good layout.
 - Otherwise `reconcile_and_publish()` compares the new layout with the current one, and:
   - bumps `g_node_gen[i]` whenever node `i` is now a different server (after a failover, a new shard,
@@ -141,12 +145,11 @@ turn.
 
 ### 2. Deciding where the command goes (`cmd.c`)
 
-`route_command()` picks which kind of backend connection the command needs, taking the client's
-session into account:
-
-- a client inside `MULTI` uses a transaction connection;
-- a client that has subscribed to channels uses its subscription connection (except for
-  `PUBLISH`/`SPUBLISH`).
+Transaction commands (`MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`) and every command sent inside
+`MULTI` are handed straight to `txn_dispatch()` in `txn.c` (see [Transactions](#transactions-txnc)
+below). For everything else, `route_command()` picks which kind of backend connection the command
+needs. A client that has subscribed to channels uses its subscription connection, except for
+`PUBLISH`/`SPUBLISH`.
 
 `classify_command()` then sorts the command into one of six classes:
 
@@ -154,7 +157,7 @@ session into account:
 |---|---|---|
 | `CMD_CLASS_SINGLE_KEY` | Hash the key to a slot (`key_slot()`: CRC16, respecting `{hash tags}`), look up the node that owns that slot, send it there. | `client.c` |
 | `CMD_CLASS_MULTI_KEY` | **Fan-out** commands (`MGET`, `MSET`, `DEL`, `EXISTS`, `TOUCH`, `UNLINK`, `LCS`, ...) are split into one piece per node, sent in parallel, and the replies are combined into one. Other multi-key commands must have all their keys in the same slot; otherwise the client gets `-CROSSSLOT`. | `fanout.c` |
-| `CMD_CLASS_NO_SLOT` | Commands without a key. Some are answered by the proxy itself (`INFO`, `CLIENT`, `HELLO`, `PROXY`, `CLUSTER KEYSLOT`, ...), some are sent to every primary and the results combined (`DBSIZE`, `SCAN`, `FLUSHALL`, ...), and the rest go to one node. | `fanout.c`, `info.c`, `hello.c`, `metrics.c` |
+| `CMD_CLASS_NO_SLOT` | Commands without a key. Some are answered by the proxy itself (`INFO`, `CLIENT`, `HELLO`, `PROXY`, `CLUSTER KEYSLOT`, ...), some are sent to every primary and the results combined (`DBSIZE`, `SCAN`, `FLUSHALL`, ...), and the rest go to one node (`CLUSTER SLOTS`, for example, is relayed unchanged from one primary). | `fanout.c`, `info.c`, `hello.c`, `metrics.c` |
 | `CMD_CLASS_BLOCKING` | Commands that can wait for data (`BLPOP`, `BRPOP`, `XREAD ... BLOCK`, ...) get a connection of their own, so they don't hold up anyone else. | `client.c` |
 | `CMD_CLASS_PUBSUB` | Subscriptions use a connection reserved for that client (`sub_conn`). | `pubsub.c` |
 | `CMD_CLASS_ACL` | `AUTH`/`ACL`. A client that logs in as a non-default user gets its own logged-in connection to each node. | `acl.c` |
@@ -169,8 +172,8 @@ database × node × pool type:
 | `POOL_NORMAL` | Single-key and fan-out commands, when multiplexing is off. |
 | `POOL_BLOCKING` | Blocking commands. |
 | `POOL_SUBSCRIPTION` | Pub/Sub. |
-| `POOL_TRANSACTION` | `MULTI`/`EXEC`/`WATCH`. |
-| `POOL_ACL` | Connections logged in as a client's own ACL user. |
+| `POOL_TRANSACTION` | Transactions. A connection stays with one client for the whole transaction. |
+| `POOL_ACL` | Connections logged in as a client's own ACL user, including for that user's transactions. |
 | `POOL_SHARED` | Connections shared by many requests at once, when `backend_multiplexing` is on. |
 
 The first five pools lend out connections **one request at a time**. A command borrows a connection
@@ -209,6 +212,38 @@ the same connection at once:
 All shared connections are opened at startup: `shared_connection_per_node × nodes × workers`, plus
 the same again for each extra database in use. The proxy prints a warning if that adds up to more
 than half of `max_connection`.
+
+#### Transactions (`txn.c`)
+
+`MULTI`, `EXEC`, `DISCARD`, `WATCH` and `UNWATCH` behave as they do on a Valkey cluster. The details,
+including exactly which commands can be queued, are in [FEATURES.md](FEATURES.md) §8.
+
+- **One connection:** a transaction runs on one backend connection, which stays with the client
+  (`client->txn_conn`) from its first `WATCH` or first queued command until `EXEC`, `DISCARD` or
+  `UNWATCH`. Clients using the default user take one from `POOL_TRANSACTION`. If all of them are in
+  use, the transaction waits for one. A client logged in as its own ACL user uses its own connection
+  to that node instead.
+- **One slot:** the first key the transaction uses, in `WATCH` or in a queued command, picks the slot
+  and the node. A key in any other slot gets `-CROSSSLOT`. Keyless commands that only make sense on
+  one node (`PING`, `ECHO`, `TIME`, `UNWATCH`, and `EVAL`/`FCALL` with no keys) can be queued once
+  that node is known. Other keyless commands are rejected.
+- **`MULTI` goes out late:** the proxy answers `MULTI` itself and sends it to the backend only just
+  before the first command that needs it, as a request of its own. That way, if the backend refuses
+  `MULTI` (for example with `NOPERM`), the next command can't run outside the transaction by
+  mistake.
+- **Rejected commands:** if the proxy or the backend rejects a command inside `MULTI`, the
+  transaction is marked as failed (`txn_dirty`), and `EXEC` answers `-EXECABORT`.
+- **Slot moved:** commands keep going to the node picked at the start. If the slot has moved since,
+  the backend answers `-MOVED` without running anything. A transaction without `WATCH` is then
+  replayed on the new node from a copy of its queued commands (`txn_buf`, up to
+  `transaction_replay_buffer_size` bytes, at most twice). A transaction with `WATCH` can't be
+  replayed, because the `WATCH` was on the old node, so `EXEC` answers nil and the client retries,
+  as after any `WATCH` abort.
+- **Lost connection:** every way a backend connection can close ends in `pool_destroy_conn()`, which
+  tells the transaction (`txn_conn_gone()`). A lost `WATCH` makes `EXEC` answer nil, and a lost
+  `MULTI` makes it answer `-EXECABORT`.
+- **RESP2 clients:** each element of `EXEC`'s reply is converted the same way as the reply to the
+  command queued in that position.
 
 ### 4. Sending the reply: RESP2 and RESP3 (`hello.c`, `resp.c`)
 
@@ -251,6 +286,7 @@ Clients can use either version of the protocol, RESP2 or RESP3, and switch with 
 | `cmd.c` | Command tables; picking the pool type and command class |
 | `pool.c` | One-at-a-time connection pools, the wait queue, updating pools after a layout change |
 | `mux.c` | Multiplexing over `POOL_SHARED` connections |
+| `txn.c` | Transactions: `MULTI`/`EXEC`/`DISCARD`/`WATCH`/`UNWATCH`, the pinned connection, replay after `-MOVED` |
 | `fanout.c` | Fan-out, sent-to-every-node and proxy-answered commands, combining replies |
 | `pubsub.c` | Pub/Sub sessions |
 | `acl.c` | `AUTH`/`ACL` and per-user logged-in connections |
@@ -269,3 +305,11 @@ Clients can use either version of the protocol, RESP2 or RESP3, and switch with 
   raise the operating system's open-file limit (`RLIMIT_NOFILE`) to match.
 - Periodic topology refresh is off by default (`cluster_refresh_interval_ms 0`). Without it, the
   proxy doesn't notice failovers or resharding until it's restarted.
+- Outside transactions, the proxy doesn't follow `-MOVED` or `-ASK` replies. A slot that has moved
+  is picked up only by the next topology refresh. Inside a transaction, `-ASK` and `-TRYAGAIN` are
+  returned to the client as they are.
+- Once the refresh thread has switched to another node, it doesn't go back to the configured
+  `server_ip`. If that is a DNS name that later points to new nodes, the proxy only notices if one
+  of the nodes it already knows still answers.
+- A client that `WATCH`es and never sends `EXEC`, `DISCARD` or `UNWATCH` keeps its transaction
+  connection until it disconnects.

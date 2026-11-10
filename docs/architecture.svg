@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1250 860" width="1250" height="860" role="img" aria-label="Diagram: three clients connect to the main thread, which hands each one through a handoff pipe to a worker thread. Inside the worker, a client connection stage feeds a router, which sends single-key and fan-out commands over the multiplexed POOL_SHARED connections and other commands over exclusive pools (NORMAL, BLOCKING, SUBSCRIPTION, ACL; TRANSACTION is not wired). All pools reach the primaries of a three-shard Valkey Cluster. A topology refresh thread polls CLUSTER NODES and nudges workers through a wake pipe. Replicas are skipped.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1250 860" width="1250" height="860" role="img" aria-label="Diagram: three clients connect to the main thread, which hands each one through a handoff pipe to a worker thread. Inside the worker, a client connection stage feeds a router, which sends single-key and fan-out commands over the multiplexed POOL_SHARED connections and other commands over exclusive pools (NORMAL, BLOCKING, SUBSCRIPTION, ACL, TRANSACTION). All pools reach the primaries of a three-shard Valkey Cluster. A topology refresh thread polls CLUSTER NODES and nudges workers through a wake pipe. Replicas are skipped.">
         <defs>
           <marker id="arrow-live" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 Z" class="mk-live"/>
@@ -71,7 +71,8 @@
         <path d="M840,481 L900,481" class="line-live"/>
         <path d="M840,545 L900,545" class="line-live"/>
         <path d="M840,609 L900,609" class="line-live"/>
-        <path d="M900,142 L900,609" class="line-live"/>
+        <path d="M840,673 L900,673" class="line-live"/>
+        <path d="M900,142 L900,673" class="line-live"/>
         <path d="M900,142 L958,142" class="line-live" marker-end="url(#arrow-live)"/>
         <path d="M900,332 L958,332" class="line-live" marker-end="url(#arrow-live)"/>
         <path d="M900,522 L958,522" class="line-live" marker-end="url(#arrow-live)"/>
@@ -84,7 +85,7 @@
         <path d="M1228,142 L1203,142" class="line-ctrl" marker-end="url(#arrow-ctrl)"/>
         <path d="M1228,332 L1203,332" class="line-ctrl" marker-end="url(#arrow-ctrl)"/>
         <path d="M1228,522 L1203,522" class="line-ctrl" marker-end="url(#arrow-ctrl)"/>
-        <text x="706" y="822" class="t-mono t-tiny t-center">CLUSTER NODES · seed (server_ip) first, then any known node</text>
+        <text x="706" y="822" class="t-mono t-tiny t-center">CLUSTER NODES · last node that answered (starts at server_ip), then any known node</text>
 
         <!-- ===================== CLIENTS ===================== -->
         <rect x="20" y="120" width="130" height="56" rx="10" class="box-fill box-line"/>
@@ -155,12 +156,10 @@
         <text x="430" y="622" class="t-sans t-sub">non-default AUTH user · pinned conn per node</text>
         <text x="822" y="614" class="t-mono t-sub t-end">0–10</text>
 
-        <g class="pool-dead">
-          <rect x="410" y="646" width="430" height="54" rx="10" class="box-fill box-line-dead"/>
-          <text x="430" y="669" class="t-mono t-title t-dimtitle">POOL_TRANSACTION</text>
-          <text x="430" y="686" class="t-sans t-sub t-warn">MULTI / EXEC / WATCH · not routed yet</text>
-          <text x="822" y="678" class="t-mono t-sub t-end">0–10</text>
-        </g>
+        <rect x="410" y="646" width="430" height="54" rx="10" class="box-fill box-line-accent"/>
+        <text x="430" y="669" class="t-mono t-title">POOL_TRANSACTION</text>
+        <text x="430" y="686" class="t-sans t-sub">MULTI / EXEC / WATCH · pinned per transaction, one slot</text>
+        <text x="822" y="678" class="t-mono t-sub t-end">0–10</text>
 
         <!-- worker footnotes -->
         <text x="410" y="730" class="t-sans t-tiny">• pools exist per db × node; a db's pools open on first SELECT</text>
