@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1250 860" width="1250" height="860" role="img" aria-label="Diagram: three clients connect to the main thread, which hands each one through a handoff pipe to a worker thread. Inside the worker, a client connection stage feeds a router, which sends single-key and fan-out commands over the multiplexed POOL_SHARED connections and other commands over exclusive pools (NORMAL, BLOCKING, SUBSCRIPTION, ACL; TRANSACTION is not wired). All pools reach the primaries of a three-shard Valkey Cluster. A topology refresh thread polls CLUSTER NODES and nudges workers through a wake pipe. Replicas are skipped.">
+        <defs>
+          <marker id="arrow-live" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" class="mk-live"/>
+          </marker>
+          <marker id="arrow-ctrl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" class="mk-ctrl"/>
+          </marker>
+          <marker id="arrow-neutral" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" class="mk-neutral"/>
+          </marker>
+        </defs>
+<style>
+  svg{--paper:#eef1f2;--panel:#ffffff;--panel-2:#e4e9eb;--ink:#161a1e;--ink-dim:#5b636a;--line:#c7ced3;--accent:#0f7d78;--accent-ink:#0a5f5b;--warn:#a8580f;--muted-line:#8b949b;}
+  @media (prefers-color-scheme: dark){
+    svg{--paper:#10151a;--panel:#1a2127;--panel-2:#141a1f;--ink:#e7ecef;--ink-dim:#98a1a8;--line:#333d44;--accent:#4fd6ce;--accent-ink:#7ee6df;--warn:#f0a94e;--muted-line:#6b747b;}
+  }
+  .bg{fill:var(--panel);}
+  .box-fill{fill:var(--panel);}
+  .box-tint{fill:var(--panel-2);}
+  .box-line{stroke:var(--line);stroke-width:1.4;}
+  .box-line-accent{stroke:var(--accent);stroke-width:1.6;}
+  .box-line-strong{stroke:var(--accent);stroke-width:2.6;}
+  .box-line-muted{stroke:var(--muted-line);stroke-width:1.3;stroke-dasharray:3 3;}
+  .box-line-dead{stroke:var(--line);stroke-width:1.3;stroke-dasharray:2 3;}
+  .ghost{fill:var(--panel-2);stroke:var(--line);stroke-width:1.2;}
+  text{fill:var(--ink);}
+  .t-mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  .t-sans{font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;}
+  .t-title{font-size:14.5px;font-weight:600;fill:var(--ink);}
+  .t-sub{font-size:10.5px;fill:var(--ink-dim);}
+  .t-tiny{font-size:9.5px;fill:var(--ink-dim);}
+  .t-label{font-size:9.5px;letter-spacing:.08em;fill:var(--accent-ink);font-weight:600;}
+  .t-label-dim{font-size:9.5px;letter-spacing:.08em;fill:var(--ink-dim);font-weight:600;}
+  .t-accent{fill:var(--accent-ink);font-weight:600;}
+  .t-warn{fill:var(--warn);}
+  .t-dimtitle{fill:var(--ink-dim);}
+  .t-center{text-anchor:middle;}
+  .t-end{text-anchor:end;}
+  .line-live{stroke:var(--accent);stroke-width:1.6;fill:none;}
+  .line-strong{stroke:var(--accent);stroke-width:3.2;fill:none;}
+  .line-ctrl{stroke:var(--muted-line);stroke-width:1.3;stroke-dasharray:4 3;fill:none;}
+  .line-repl{stroke:var(--muted-line);stroke-width:1.3;stroke-dasharray:2 3;fill:none;}
+  .line-neutral{stroke:var(--ink-dim);stroke-width:1.3;fill:none;opacity:.6;}
+  .pool-dead{opacity:.72;}
+  .mk-live{fill:var(--accent);} .mk-ctrl{fill:var(--muted-line);} .mk-neutral{fill:var(--ink-dim);opacity:.7;}
+</style>
+<rect class="bg" x="0" y="0" width="1250" height="860" rx="14"/>
+
+        <!-- ===================== WORKER CONTAINER (stacked = × worker_thread_no) ===================== -->
+        <rect x="406" y="56" width="470" height="740" rx="16" class="ghost"/>
+        <rect x="398" y="48" width="470" height="740" rx="16" class="ghost"/>
+        <rect x="390" y="40" width="470" height="740" rx="16" class="box-tint box-line"/>
+        <text x="625" y="66" class="t-mono t-title t-center">worker thread × worker_thread_no</text>
+        <text x="625" y="84" class="t-sans t-sub t-center">own event loop, pools and topology snapshot · no locks on the command path</text>
+
+        <!-- ===================== CONNECTORS (under the boxes) ===================== -->
+        <!-- clients -> main -->
+        <path d="M150,148 L185,232" class="line-neutral" marker-end="url(#arrow-neutral)"/>
+        <path d="M150,250 L185,250" class="line-neutral" marker-end="url(#arrow-neutral)"/>
+        <path d="M150,352 L185,268" class="line-neutral" marker-end="url(#arrow-neutral)"/>
+        <!-- main -> worker: handoff pipe -->
+        <path d="M355,250 L372,250 L372,138 L408,138" class="line-neutral" marker-end="url(#arrow-neutral)"/>
+        <!-- client conn -> router -> pools (internal) -->
+        <path d="M625,166 L625,184" class="line-neutral" marker-end="url(#arrow-neutral)"/>
+        <path d="M800,242 L800,276" class="line-neutral" marker-end="url(#arrow-neutral)"/>
+
+        <!-- business bus: pools -> primaries -->
+        <path d="M840,315 L900,315" class="line-strong"/>
+        <path d="M840,417 L900,417" class="line-live"/>
+        <path d="M840,481 L900,481" class="line-live"/>
+        <path d="M840,545 L900,545" class="line-live"/>
+        <path d="M840,609 L900,609" class="line-live"/>
+        <path d="M900,142 L900,609" class="line-live"/>
+        <path d="M900,142 L958,142" class="line-live" marker-end="url(#arrow-live)"/>
+        <path d="M900,332 L958,332" class="line-live" marker-end="url(#arrow-live)"/>
+        <path d="M900,522 L958,522" class="line-live" marker-end="url(#arrow-live)"/>
+        <text x="930" y="132" class="t-mono t-tiny t-center t-accent">by slot</text>
+
+        <!-- control plane: refresh -> wake pipe -> worker -->
+        <path d="M355,600 L388,600" class="line-ctrl" marker-end="url(#arrow-ctrl)"/>
+        <!-- control plane: refresh -> CLUSTER NODES, routed under the diagram and up the right side -->
+        <path d="M185,640 L185,830 L1228,830 L1228,142" class="line-ctrl"/>
+        <path d="M1228,142 L1203,142" class="line-ctrl" marker-end="url(#arrow-ctrl)"/>
+        <path d="M1228,332 L1203,332" class="line-ctrl" marker-end="url(#arrow-ctrl)"/>
+        <path d="M1228,522 L1203,522" class="line-ctrl" marker-end="url(#arrow-ctrl)"/>
+        <text x="706" y="822" class="t-mono t-tiny t-center">CLUSTER NODES · seed (server_ip) first, then any known node</text>
+
+        <!-- ===================== CLIENTS ===================== -->
+        <rect x="20" y="120" width="130" height="56" rx="10" class="box-fill box-line"/>
+        <text x="85" y="144" class="t-sans t-title t-center" style="font-size:13px;">Client A</text>
+        <text x="85" y="162" class="t-mono t-tiny t-center">RESP2 / RESP3</text>
+
+        <rect x="20" y="222" width="130" height="56" rx="10" class="box-fill box-line"/>
+        <text x="85" y="246" class="t-sans t-title t-center" style="font-size:13px;">Client B</text>
+        <text x="85" y="264" class="t-mono t-tiny t-center">pipelined</text>
+
+        <rect x="20" y="324" width="130" height="56" rx="10" class="box-fill box-line"/>
+        <text x="85" y="348" class="t-sans t-title t-center" style="font-size:13px;">Client C</text>
+        <text x="85" y="366" class="t-mono t-tiny t-center">TCP · unix · TLS</text>
+
+        <!-- ===================== MAIN THREAD ===================== -->
+        <rect x="185" y="195" width="170" height="110" rx="10" class="box-fill box-line"/>
+        <text x="270" y="219" class="t-mono t-title t-center">main thread</text>
+        <text x="270" y="238" class="t-mono t-sub t-center">accept_loop()</text>
+        <text x="270" y="254" class="t-sans t-tiny t-center">pick_worker(): fewest clients,</text>
+        <text x="270" y="267" class="t-sans t-tiny t-center">ties round-robin</text>
+        <text x="270" y="290" class="t-mono t-tiny t-center t-accent">→ handoff pipe (fd)</text>
+
+        <!-- ===================== REFRESH THREAD ===================== -->
+        <rect x="20" y="560" width="335" height="80" rx="10" class="box-fill box-line-muted"/>
+        <text x="38" y="584" class="t-mono t-title t-dimtitle">topology refresh thread</text>
+        <text x="38" y="602" class="t-sans t-sub">every cluster_refresh_interval_ms (0 = off)</text>
+        <text x="38" y="618" class="t-sans t-sub">bumps g_topology_version, keeps last good map</text>
+        <text x="337" y="584" class="t-mono t-tiny t-end">wake pipe →</text>
+
+        <!-- ===================== CLIENT CONNECTION ===================== -->
+        <rect x="410" y="110" width="430" height="56" rx="10" class="box-fill box-line-accent"/>
+        <text x="430" y="134" class="t-mono t-title">Client connection</text>
+        <text x="430" y="152" class="t-sans t-sub">RESP parse · pipelined input waits in qbuf · replies in order</text>
+
+        <!-- ===================== ROUTER ===================== -->
+        <rect x="410" y="186" width="430" height="56" rx="10" class="box-fill box-line-accent"/>
+        <text x="430" y="210" class="t-mono t-title">Router</text>
+        <text x="430" y="228" class="t-sans t-sub">classify_command() · CRC16(key) mod 16384 → shard · fan-out split + merge</text>
+
+        <!-- ===================== MULTIPLEXED POOL ===================== -->
+        <text x="410" y="270" class="t-mono t-label">MULTIPLEXED · backend_multiplexing yes</text>
+        <rect x="410" y="278" width="430" height="74" rx="10" class="box-fill box-line-strong"/>
+        <text x="430" y="302" class="t-mono t-title">POOL_SHARED</text>
+        <text x="430" y="320" class="t-sans t-sub">single-key (≤ 16 KB) + fan-out pieces, many in flight per conn</text>
+        <text x="430" y="337" class="t-sans t-sub">conn = slot % 4 keeps per-key order · FIFO matches replies</text>
+        <text x="822" y="302" class="t-mono t-sub t-end">4 / node, fixed</text>
+
+        <!-- ===================== EXCLUSIVE POOLS ===================== -->
+        <text x="410" y="380" class="t-mono t-label-dim">EXCLUSIVE · one request per connection</text>
+
+        <rect x="410" y="390" width="430" height="54" rx="10" class="box-fill box-line-accent"/>
+        <text x="430" y="413" class="t-mono t-title">POOL_NORMAL</text>
+        <text x="430" y="430" class="t-sans t-sub">keyless, same-slot multi-key, &gt; 16 KB, or all when mux is off</text>
+        <text x="822" y="422" class="t-mono t-sub t-end">2–20</text>
+
+        <rect x="410" y="454" width="430" height="54" rx="10" class="box-fill box-line-accent"/>
+        <text x="430" y="477" class="t-mono t-title">POOL_BLOCKING</text>
+        <text x="430" y="494" class="t-sans t-sub">BLPOP / BRPOP / XREAD … BLOCK</text>
+        <text x="822" y="486" class="t-mono t-sub t-end">2–10</text>
+
+        <rect x="410" y="518" width="430" height="54" rx="10" class="box-fill box-line-accent"/>
+        <text x="430" y="541" class="t-mono t-title">POOL_SUBSCRIPTION</text>
+        <text x="430" y="558" class="t-sans t-sub">(P|S)SUBSCRIBE · pinned per client</text>
+        <text x="822" y="550" class="t-mono t-sub t-end">0–10</text>
+
+        <rect x="410" y="582" width="430" height="54" rx="10" class="box-fill box-line-accent"/>
+        <text x="430" y="605" class="t-mono t-title">POOL_ACL</text>
+        <text x="430" y="622" class="t-sans t-sub">non-default AUTH user · pinned conn per node</text>
+        <text x="822" y="614" class="t-mono t-sub t-end">0–10</text>
+
+        <g class="pool-dead">
+          <rect x="410" y="646" width="430" height="54" rx="10" class="box-fill box-line-dead"/>
+          <text x="430" y="669" class="t-mono t-title t-dimtitle">POOL_TRANSACTION</text>
+          <text x="430" y="686" class="t-sans t-sub t-warn">MULTI / EXEC / WATCH · not routed yet</text>
+          <text x="822" y="678" class="t-mono t-sub t-end">0–10</text>
+        </g>
+
+        <!-- worker footnotes -->
+        <text x="410" y="730" class="t-sans t-tiny">• pools exist per db × node; a db's pools open on first SELECT</text>
+        <text x="410" y="748" class="t-sans t-tiny">• stops reading a client at max_pipeline_inflight (256) or 4 MB of unsent replies</text>
+        <text x="410" y="766" class="t-sans t-tiny">• commands that can't be multiplexed wait for every earlier reply first</text>
+
+        <!-- ===================== CLUSTER ===================== -->
+        <text x="1080" y="100" class="t-mono t-sub t-center" style="letter-spacing:.03em;">SHARD 1 · slots 0–5460</text>
+        <rect x="960" y="110" width="240" height="65" rx="10" class="box-fill box-line-accent"/>
+        <text x="1080" y="136" class="t-mono t-title t-center">Primary 1</text>
+        <text x="1080" y="154" class="t-sans t-sub t-center">live traffic + topology</text>
+        <path d="M1080,175 L1080,192" class="line-repl" marker-end="url(#arrow-ctrl)"/>
+        <rect x="960" y="195" width="240" height="50" rx="10" class="box-fill box-line-muted"/>
+        <text x="1080" y="217" class="t-mono t-title t-center t-dimtitle">Replica 1</text>
+        <text x="1080" y="234" class="t-sans t-sub t-center">skipped by the proxy</text>
+
+        <text x="1080" y="290" class="t-mono t-sub t-center" style="letter-spacing:.03em;">SHARD 2 · slots 5461–10922</text>
+        <rect x="960" y="300" width="240" height="65" rx="10" class="box-fill box-line-accent"/>
+        <text x="1080" y="326" class="t-mono t-title t-center">Primary 2</text>
+        <text x="1080" y="344" class="t-sans t-sub t-center">live traffic + topology</text>
+        <path d="M1080,365 L1080,382" class="line-repl" marker-end="url(#arrow-ctrl)"/>
+        <rect x="960" y="385" width="240" height="50" rx="10" class="box-fill box-line-muted"/>
+        <text x="1080" y="407" class="t-mono t-title t-center t-dimtitle">Replica 2</text>
+        <text x="1080" y="424" class="t-sans t-sub t-center">skipped by the proxy</text>
+
+        <text x="1080" y="480" class="t-mono t-sub t-center" style="letter-spacing:.03em;">SHARD 3 · slots 10923–16383</text>
+        <rect x="960" y="490" width="240" height="65" rx="10" class="box-fill box-line-accent"/>
+        <text x="1080" y="516" class="t-mono t-title t-center">Primary 3</text>
+        <text x="1080" y="534" class="t-sans t-sub t-center">live traffic + topology</text>
+        <path d="M1080,555 L1080,572" class="line-repl" marker-end="url(#arrow-ctrl)"/>
+        <rect x="960" y="575" width="240" height="50" rx="10" class="box-fill box-line-muted"/>
+        <text x="1080" y="597" class="t-mono t-title t-center t-dimtitle">Replica 3</text>
+        <text x="1080" y="614" class="t-sans t-sub t-center">skipped by the proxy</text>
+      </svg>
