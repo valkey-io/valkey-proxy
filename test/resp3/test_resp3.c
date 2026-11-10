@@ -507,6 +507,48 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     n = resp_send_raw_reply(fd3, raw, sizeof(raw), 4, "CLIENT", "LIST", "ID", "999999999");
     CHECK(n > 0 && !strcmp(raw, "=4\r\ntxt:\r\n"), "CLIENT LIST: verbatim string over RESP3", pass, fail);
 
+    /* ── EXEC over a RESP3 backend connection: a RESP2 client gets every
+     * element of the reply downgraded as the reply to the command queued in
+     * its position (WITHSCORES flattened, the map flattened, LPOP's nil as
+     * $-1), a RESP3 client gets the native shapes ───────────────────────── */
+    printf("\n--- MULTI / EXEC on RESP3 backend connections ---\n");
+    proxy_cmd(fd2, r, sizeof(r), 4, "DEL", "{tc:resp3:tx}z", "{tc:resp3:tx}h", "{tc:resp3:tx}l");
+    proxy_cmd(fd2, r, sizeof(r), 6, "ZADD", "{tc:resp3:tx}z", "1", "a", "2", "b");
+    proxy_cmd(fd2, r, sizeof(r), 4, "HSET", "{tc:resp3:tx}h", "f", "v");
+    resp_send_raw_reply(fd2, raw, sizeof(raw), 1, "MULTI");
+    resp_send_raw_reply(fd2, raw, sizeof(raw), 5, "ZRANGE", "{tc:resp3:tx}z", "0", "-1", "WITHSCORES");
+    resp_send_raw_reply(fd2, raw, sizeof(raw), 2, "HGETALL", "{tc:resp3:tx}h");
+    resp_send_raw_reply(fd2, raw, sizeof(raw), 2, "LPOP", "{tc:resp3:tx}l");
+    resp_send_raw_reply(fd2, raw, sizeof(raw), 3, "ZSCORE", "{tc:resp3:tx}z", "a");
+    n = resp_send_raw_reply(fd2, raw, sizeof(raw), 1, "EXEC");
+    CHECK(n > 0 && !strcmp(raw, "*4\r\n*4\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n"
+                                "*2\r\n$1\r\nf\r\n$1\r\nv\r\n$-1\r\n$1\r\n1\r\n"),
+          "RESP2 EXEC: each element downgraded like its own command's reply", pass, fail);
+    resp_send_raw_reply(fd3, raw, sizeof(raw), 1, "MULTI");
+    resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "HGETALL", "{tc:resp3:tx}h");
+    resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "LPOP", "{tc:resp3:tx}l");
+    n = resp_send_raw_reply(fd3, raw, sizeof(raw), 1, "EXEC");
+    CHECK(n > 0 && !strcmp(raw, "*2\r\n%1\r\n$1\r\nf\r\n$1\r\nv\r\n_\r\n"), "RESP3 EXEC: native map and null", pass,
+          fail);
+    /* A WATCH abort is a nil array for RESP2, a null for RESP3 */
+    {
+        int other = proxy_connect(host, port);
+        resp_send_raw_reply(fd2, raw, sizeof(raw), 2, "WATCH", "{tc:resp3:tx}h");
+        if (other >= 0) proxy_cmd(other, r, sizeof(r), 4, "HSET", "{tc:resp3:tx}h", "f", "w");
+        resp_send_raw_reply(fd2, raw, sizeof(raw), 1, "MULTI");
+        resp_send_raw_reply(fd2, raw, sizeof(raw), 2, "HGETALL", "{tc:resp3:tx}h");
+        n = resp_send_raw_reply(fd2, raw, sizeof(raw), 1, "EXEC");
+        CHECK(n > 0 && !strcmp(raw, "*-1\r\n"), "RESP2 EXEC after a WATCH abort: *-1", pass, fail);
+        resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "WATCH", "{tc:resp3:tx}h");
+        if (other >= 0) proxy_cmd(other, r, sizeof(r), 4, "HSET", "{tc:resp3:tx}h", "f", "x");
+        resp_send_raw_reply(fd3, raw, sizeof(raw), 1, "MULTI");
+        resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "HGETALL", "{tc:resp3:tx}h");
+        n = resp_send_raw_reply(fd3, raw, sizeof(raw), 1, "EXEC");
+        CHECK(n > 0 && !strcmp(raw, "_\r\n"), "RESP3 EXEC after a WATCH abort: _", pass, fail);
+        if (other >= 0) close(other);
+    }
+    proxy_cmd(fd2, r, sizeof(r), 3, "DEL", "{tc:resp3:tx}z", "{tc:resp3:tx}h");
+
     /* ── cleanup ──────────────────────────────────────────────────────── */
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:k1");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:hash");

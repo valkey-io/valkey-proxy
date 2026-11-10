@@ -35,6 +35,7 @@ void parse_conf(const char *path) {
     g_config.backend_multiplexing = 1;
     g_config.shared_connection_per_node = DEFAULT_SHARED_CONNECTION_PER_NODE;
     g_config.max_pipeline_inflight = DEFAULT_MAX_PIPELINE_INFLIGHT;
+    g_config.transaction_replay_buffer_size = 1024 * 1024;
     char line[512], key[64], val[448];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == '\n') continue;
@@ -80,6 +81,8 @@ void parse_conf(const char *path) {
             g_config.shared_connection_per_node = atoi(val);
         else if (!strcmp(key, "max_pipeline_inflight"))
             g_config.max_pipeline_inflight = atoi(val);
+        else if (!strcmp(key, "transaction_replay_buffer_size"))
+            g_config.transaction_replay_buffer_size = atoi(val);
         else if (!strcmp(key, "min_normal_connection"))
             g_pool_min[POOL_NORMAL] = atoi(val);
         else if (!strcmp(key, "max_normal_connection"))
@@ -130,6 +133,11 @@ void parse_conf(const char *path) {
         fprintf(stderr, "Warning: max_pipeline_inflight must be positive (got %d); falling back to default %d\n",
                 g_config.max_pipeline_inflight, DEFAULT_MAX_PIPELINE_INFLIGHT);
         g_config.max_pipeline_inflight = DEFAULT_MAX_PIPELINE_INFLIGHT;
+    }
+    if (g_config.transaction_replay_buffer_size < 0) {
+        fprintf(stderr, "Warning: transaction_replay_buffer_size can't be negative (got %d); using 0 (no replay)\n",
+                g_config.transaction_replay_buffer_size);
+        g_config.transaction_replay_buffer_size = 0;
     }
     /* Shared connections are picked by slot % count, so the pool must hold
      * exactly this many at all times; with multiplexing off it's unused. */

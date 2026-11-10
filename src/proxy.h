@@ -78,6 +78,20 @@ typedef enum {
 
 extern const char *CMD_CLASS_NAME[];
 
+/* What a transaction is waiting on from its pinned connection (see src/txn.c). */
+typedef enum {
+    TXN_OP_NONE = 0,
+    TXN_OP_WATCH,        /* WATCH forwarded */
+    TXN_OP_QUEUE,        /* a command forwarded inside MULTI */
+    TXN_OP_EXEC,         /* EXEC forwarded */
+    TXN_OP_DISCARD,      /* DISCARD forwarded */
+    TXN_OP_UNWATCH,      /* UNWATCH forwarded */
+    TXN_OP_MULTI_PRE,    /* the deferred MULTI, sent before the first QUEUE/EXEC */
+    TXN_OP_CLEANUP,      /* proxy-made DISCARD/UNWATCH; the client gets txn_local_reply */
+    TXN_OP_REPLAY_MULTI, /* MULTI on the new node of a replay after -MOVED */
+    TXN_OP_REPLAY,       /* the replayed commands (and EXEC) */
+} TxnOp;
+
 /* ── forward declarations ───────────────────────────────────────────── */
 typedef struct ConnPool ConnPool;
 typedef struct ClientConn ClientConn;
@@ -165,6 +179,10 @@ typedef struct {
      * in-flight request down immediately: the connection is reconnected (or
      * destroyed on failure) only once the caller is done with it. */
     int discard_on_release;
+    /* The client whose transaction this connection is pinned to (see
+     * src/txn.c), for as long as the pin lasts -- not just while a request
+     * is in flight, unlike waiting_client. */
+    ClientConn *txn_client;
 } PoolConn;
 
 /* Usage counters for one ConnPool, reported by PROXY POOLS (see
@@ -294,6 +312,32 @@ struct ClientConn {
     int sub_count, psub_count, ssub_count;
     int multi_count; /* # cmds queued since MULTI; -1 when not in a transaction */
     int watch_count;
+    /* ── transactions: MULTI / EXEC / DISCARD / WATCH / UNWATCH (see src/txn.c) ── */
+    PoolConn *txn_conn;          /* pinned backend connection (POOL_TRANSACTION, or one of acl_conns[]) */
+    int txn_slot, txn_node;      /* the one slot (and its node) the transaction is bound to; -1 = not yet */
+    int txn_multi_sent;          /* MULTI has been sent on txn_conn */
+    int txn_dirty;               /* a command was rejected: EXEC answers -EXECABORT */
+    int txn_watch_lost;          /* the connection holding the WATCH was lost: EXEC answers nil */
+    int txn_had_watch;           /* EXEC in flight: the transaction had WATCHed keys */
+    int txn_op;                  /* TxnOp in flight on txn_conn, TXN_OP_NONE between commands */
+    int txn_saved_op;            /* op to go on with once MULTI (or a replayed MULTI) is acknowledged */
+    int txn_op_nkeys;            /* keys of the WATCH in flight */
+    char txn_cur_name[24];       /* the command in flight inside MULTI, recorded once QUEUED */
+    const char *txn_local_reply; /* reply to send once a TXN_OP_CLEANUP's reply is in */
+    int txn_local_reply_len;
+    /* Names of the commands the backend has QUEUED, for the per-element
+     * RESP3 -> RESP2 downgrade of EXEC's reply. */
+    char (*txn_cmds)[24];
+    int txn_ncmds, txn_cmds_cap;
+    /* Replay on -MOVED: the raw bytes of every command the backend has
+     * QUEUED, plus the one in flight from txn_cur_start on. */
+    char *txn_buf;
+    int txn_buf_len, txn_buf_cap, txn_cur_start;
+    int txn_replay_off;    /* txn_buf outgrew transaction_replay_buffer_size: no replay */
+    int txn_redirects;     /* replays done so far for this transaction */
+    int txn_replay_expect; /* replies still owed to a replay in flight */
+    int txn_replay_bad;    /* a replayed command came back with something but +QUEUED */
+    int txn_replay_moved;  /* node index of a -MOVED seen during the replay, -1 = none */
     /* ── ACL identity (see src/acl.c) ──────────────────────────────────── */
     int acl_authenticated; /* 1 = using a non-default ACL identity */
     char acl_user[64];
@@ -444,6 +488,9 @@ typedef struct {
     int backend_multiplexing;
     int shared_connection_per_node;
     int max_pipeline_inflight;
+    /* Most bytes of queued commands a transaction keeps for replaying it on
+     * the new node after a -MOVED (see src/txn.c); 0 = never replay. */
+    int transaction_replay_buffer_size;
     int cluster_refresh_interval_ms; /* 0 = periodic refresh disabled */
     int cluster_node_fail_grace_ms;
     /* Connect timeout for backend connections made *after* startup: pool
@@ -655,6 +702,19 @@ int cmd_resp3_pair_transform(const char *cmd);
 /* ── client helpers ─────────────────────────────────────────────────── */
 void client_send_error(Worker *w, ClientConn *client, const char *msg);
 void client_send_crossslot(ClientConn *client);
+/* Writes reply[0..len) to client as-is (queued behind earlier multiplexed
+ * replies if any are still owed). */
+void client_send_raw(ClientConn *client, const char *reply, int len);
+/* Answers the current command with reply[0..len) without running it: skips
+ * whatever of its body is still unread so the next command parses cleanly,
+ * and goes back to reading. */
+void client_reject_cmd(Worker *w, ClientConn *client, const char *reply, int len);
+/* client_reject_cmd() with "-ERR <msg>". */
+void client_reject_error(Worker *w, ClientConn *client, const char *msg);
+/* Starts collecting the current command in pbuf (CS_BUFFERING_CMD). Returns
+ * 1 if it is already whole, 0 if more has to be read, -1 if the client was
+ * closed. */
+int client_buffer_cmd(Worker *w, ClientConn *client);
 void close_client(Worker *w, ClientConn *client);
 void resume_client_after_conn(Worker *w, ClientConn *client, PoolConn *conn);
 void client_recover_after_backend_error(Worker *w, ClientConn *client, PoolConn *conn, const char *msg);
@@ -710,6 +770,7 @@ void handle_cluster_cmd(Worker *w, ClientConn *client, int cmdlen);
 /* CLIENT INFO's flags field, P for a subscribed client as on Valkey; CLIENT
  * LIST's FLAGS filter matches against it. */
 static inline const char *client_info_flags(const ClientConn *c) {
+    if (c->in_transaction) return "x";
     return c->sub_count + c->psub_count + c->ssub_count > 0 ? "P" : "N";
 }
 int format_client_info_line(Worker *w, ClientConn *client, char *out, int cap);
@@ -765,6 +826,34 @@ int acl_route_business_cmd(Worker *w, ClientConn *client, int node_idx);
 void acl_teardown_all(Worker *w, ClientConn *client);
 void handle_acl_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_acl_help_readable(Worker *w, PoolConn *conn);
+
+/* ── transactions (see src/txn.c) ─────────────────────────────────────── */
+/* Handles a command while the client is in MULTI, or one of MULTI / EXEC /
+ * DISCARD / WATCH / UNWATCH outside it. */
+void txn_dispatch(Worker *w, ClientConn *client, const char *cmd, const char *key, int keylen, int argc);
+/* A WATCH, or a command queued inside MULTI, is now whole in pbuf. */
+void txn_buffered_complete(Worker *w, ClientConn *client, const char *cmd);
+/* resume_client_after_conn() hooks: bind conn to the transaction in flight,
+ * then (returns 1 if it took over) send the deferred MULTI first. */
+void txn_on_conn(ClientConn *client, PoolConn *conn);
+int txn_before_send(Worker *w, ClientConn *client, PoolConn *conn);
+/* Copies of a queued command's bytes as they go out, for replay. */
+void txn_record(ClientConn *client, const char *buf, int len);
+/* Backend reply on a connection with conn->txn_client and a txn_op in flight. */
+void txn_conn_readable(Worker *w, PoolConn *conn);
+/* pool_destroy_conn() hook: conn (pinned to client) is going away. */
+void txn_conn_gone(ClientConn *client, PoolConn *conn);
+/* The transaction request in flight never got to (or back from) a backend:
+ * forget it, failing the transaction as needed. */
+void txn_cmd_failed(Worker *w, ClientConn *client);
+/* Called before each new command: clears a txn_op left over by a failure
+ * path that couldn't report back. */
+void txn_reconcile(Worker *w, ClientConn *client);
+/* The client's identity changed (AUTH / HELLO AUTH): its default-identity
+ * pinned connection can't be used any more. */
+void txn_identity_changed(Worker *w, ClientConn *client);
+/* close_client(): releases everything the transaction holds. */
+void txn_client_free(Worker *w, ClientConn *client);
 
 /* ── RESP3 (HELLO command + per-connection upgrade handshake) ──────────
  * See src/hello.c. */

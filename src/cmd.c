@@ -319,26 +319,17 @@ void str_toupper(char *s) {
     for (; *s; s++) *s = (char)toupper((unsigned char)*s);
 }
 
+/* Inside MULTI every command goes to txn_dispatch() (see client.c), which
+ * owns all transaction state, so nothing here may change state then -- not
+ * even a SUBSCRIBE, which the transaction rejects. */
 PoolType route_command(ClientConn *client, const char *cmd) {
-    if (client->in_transaction) {
-        if (!strcmp(cmd, "EXEC") || !strcmp(cmd, "DISCARD")) {
-            client->in_transaction = 0;
-            client->multi_count = -1;
-        } else {
-            client->multi_count++;
-        }
-        return POOL_TRANSACTION;
-    }
+    if (client->in_transaction) return cmd_get_pool_type(cmd);
     if (client->in_subscribe) {
         if (!strcmp(cmd, "PUBLISH") || !strcmp(cmd, "SPUBLISH")) return cmd_get_pool_type(cmd);
         return POOL_SUBSCRIPTION;
     }
     PoolType pt = cmd_get_pool_type(cmd);
-    if (pt == POOL_TRANSACTION && !strcmp(cmd, "MULTI")) {
-        client->in_transaction = 1;
-        client->multi_count = 0;
-    } else if (pt == POOL_SUBSCRIPTION)
-        client->in_subscribe = 1;
+    if (pt == POOL_SUBSCRIPTION) client->in_subscribe = 1;
     return pt;
 }
 
@@ -404,10 +395,9 @@ static const char *NO_SLOT_CMDS[] = {"CLIENT",   "CLUSTER",   "COMMAND",  "COMMA
 
 /* Commands whose RESP2 reply has a nil *array* rather than a nil bulk
  * string somewhere in it -- see resp3_downgrade()'s nil_array_depth
- * argument in resp.c. EXEC is listed for completeness even though
- * transaction commands aren't actually routed to a backend yet on this
- * branch (see classify_command()'s lack of a POOL_TRANSACTION case below)
- * -- harmless now, correct once that gap is closed. */
+ * argument in resp.c. EXEC's nil is the one a WATCH abort answers with;
+ * the elements of its array are downgraded per queued command instead
+ * (see src/txn.c). */
 static const char *RESP3_NIL_ARRAY_DEPTH0_CMDS[] = {
     /* Own top-level reply is nil array (e.g. a blocking command's timeout,
      * or a *MPOP with nothing to pop). */

@@ -114,6 +114,7 @@ static void pool_fill_to(Worker *w, ConnPool *p, int want) {
         c->resp3_deferred_cmd = NULL;
         c->resp3_deferred_len = c->resp3_deferred_cap = 0;
         c->discard_on_release = 0;
+        c->txn_client = NULL;
         if (fd < g_config.max_connection) w->backend_map[fd] = c;
         printf("        [%d] fd=%-4d  %s:%d  db=%d\n", p->count, fd, node->ip, node->port, p->db);
         p->count++;
@@ -206,6 +207,7 @@ PoolConn *pool_acquire_nb(Worker *w, ConnPool *p) {
             c->acl_hello_login = 0;
             c->acl_hello_resp3 = 0;
             c->discard_on_release = 0;
+            c->txn_client = NULL;
             if (fd < g_config.max_connection) w->backend_map[fd] = c;
             printf("  [%s pool] node [%s:%d] db=%d: new conn fd=%d (%d/%d)\n", POOL_NAME[p->type], node->ip, node->port,
                    p->db, fd, p->count + 1, p->max);
@@ -254,6 +256,7 @@ void pool_remove_waiter(ConnPool *p, ClientConn *client) {
 static void pool_fail_all_waiters(Worker *w, ConnPool *p, const char *msg) {
     for (int i = 0; i < p->wait_len; i++) {
         ClientConn *client = p->wait_queue[i];
+        if (p->type == POOL_TRANSACTION) txn_cmd_failed(w, client);
         client_send_error(w, client, msg);
         client->pending_conn = NULL;
         client->hbuf_len = 0;
@@ -360,6 +363,14 @@ void pool_destroy_conn(Worker *w, PoolConn *c) {
     ConnPool *p = c->pool;
     const ClusterNode *nd = &w->topo.nodes[p->node_idx];
 
+    /* Pinned to a transaction: every way a connection can die ends here, so
+     * this is where the transaction learns it lost its WATCH / its queue. */
+    if (c->txn_client) {
+        ClientConn *tc = c->txn_client;
+        c->txn_client = NULL;
+        if (tc->txn_conn == c) txn_conn_gone(tc, c);
+    }
+
     printf("[worker %d] [pool:%s] destroy  fd=%-4d  node=%s:%d  db=%d  (pool count: %d→%d)\n", w->thread_id,
            POOL_NAME[p->type], c->fd, nd->ip, nd->port, c->db, p->count, p->count - 1);
 
@@ -401,13 +412,17 @@ void pool_destroy_conn(Worker *w, PoolConn *c) {
                     wc->hello_auth_conn = moved;
                 } else {
                     wc->acl_conns[p->node_idx] = moved;
-                    if (wc->pending_conn) wc->pending_conn = moved;
+                    if (wc->pending_conn == &p->conns[p->count]) wc->pending_conn = moved;
                 }
             } else {
                 moved->waiting_client->pending_conn = moved;
             }
         }
         if (moved->fanout_sub) moved->fanout_sub->conn = moved;
+        /* A pinned transaction connection is owned via txn_conn whether or
+         * not a request is in flight on it (waiting_client). */
+        if (moved->txn_client && moved->txn_client->txn_conn == &p->conns[p->count])
+            moved->txn_client->txn_conn = moved;
     }
     memset(&p->conns[p->count], 0, sizeof(PoolConn));
     stat_add(&p->stats.destroys, 1);

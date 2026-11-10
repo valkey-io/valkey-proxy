@@ -15,14 +15,58 @@ void client_send_error(Worker *w, ClientConn *client, const char *msg) {
     (void)w;
 }
 
-void client_send_crossslot(ClientConn *client) {
-    const char *err = "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+void client_send_raw(ClientConn *client, const char *reply, int len) {
     if (client_mux_busy(client)) {
-        mux_queue_error(client, err, (int)strlen(err));
+        mux_queue_error(client, reply, len);
         return;
     }
-    ssize_t wr = write(client->fd, err, strlen(err));
+    ssize_t wr = write(client->fd, reply, (size_t)len);
     (void)wr;
+}
+
+void client_send_crossslot(ClientConn *client) {
+    const char *err = "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+    client_send_raw(client, err, (int)strlen(err));
+}
+
+void client_reject_cmd(Worker *w, ClientConn *client, const char *reply, int len) {
+    client_send_raw(client, reply, len);
+    /* Only a command read through hbuf can still have unread bytes: one in
+     * pbuf (using_pbuf) was buffered whole. */
+    long long rest = client->using_pbuf ? 0 : (long long)client->total_cmd_len - client->hbuf_len;
+    client->hbuf_len = 0;
+    client->pbuf_len = 0;
+    client->using_pbuf = 0;
+    if (rest > 0) {
+        client->cmd_remaining = rest;
+        client->state = CS_DISCARDING_CMD;
+    } else {
+        client->state = CS_READING_HDR;
+    }
+    fd_watch(w, client->fd, EL_READABLE);
+}
+
+void client_reject_error(Worker *w, ClientConn *client, const char *msg) {
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "-ERR %s\r\n", msg);
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    client_reject_cmd(w, client, buf, n);
+}
+
+int client_buffer_cmd(Worker *w, ClientConn *client) {
+    client->state = CS_BUFFERING_CMD;
+    if (client->pbuf_cap < client->hbuf_len) {
+        char *tmp = realloc(client->pbuf, (size_t)client->hbuf_len + 4096);
+        if (!tmp) {
+            close_client(w, client);
+            return -1;
+        }
+        client->pbuf = tmp;
+        client->pbuf_cap = client->hbuf_len + 4096;
+    }
+    memcpy(client->pbuf, client->hbuf, (size_t)client->hbuf_len);
+    client->pbuf_len = client->hbuf_len;
+    return resp_response_len(client->pbuf, client->pbuf_len) > 0;
 }
 
 /* ── pipelined input ────────────────────────────────────────────────── */
@@ -145,6 +189,7 @@ void close_client(Worker *w, ClientConn *client) {
         pool_destroy_conn(w, client->pending_conn);
         client->pending_conn = NULL;
     }
+    txn_client_free(w, client);
     if (client->fanout_ctx) {
         FanoutCtx *ctx = client->fanout_ctx;
         for (int i = 0; i < ctx->nsubs; i++) {
@@ -297,6 +342,9 @@ int deliver_backend_reply(Worker *w, ClientConn *cl, PoolConn *conn, const char 
 
 /* ── resume client after getting a pool connection ──────────────────── */
 void resume_client_after_conn(Worker *w, ClientConn *client, PoolConn *conn) {
+    /* Before the RESP3 upgrade: a failed handshake destroys conn, and the
+     * transaction must already own it to hear about that. */
+    txn_on_conn(client, conn);
     if (resp3_conn_needs_upgrade(conn)) {
         if (resp3_start_conn_upgrade(w, conn) < 0) {
             /* client->pending_conn is already conn at every call site (set
@@ -310,6 +358,9 @@ void resume_client_after_conn(Worker *w, ClientConn *client, PoolConn *conn) {
         fd_unwatch(w, client->fd, EL_READABLE);
         return;
     }
+    /* A transaction's deferred MULTI goes out (and is acknowledged) first;
+     * this runs again once it has been. */
+    if (txn_before_send(w, client, conn)) return;
     const ClusterNode *nd = &w->topo.nodes[conn->pool->node_idx];
     printf("[worker %d] [pool:%s] acquire  fd=%-4d  node=%s:%d  db=%d  in-use=%d/%d  client-fd=%d\n", w->thread_id,
            POOL_NAME[conn->pool->type], conn->fd, nd->ip, nd->port, conn->db, conn->pool->count, conn->pool->max,
@@ -331,6 +382,7 @@ void resume_client_after_conn(Worker *w, ClientConn *client, PoolConn *conn) {
     memcpy(conn->wbuf, src_buf, src_len);
     conn->wbuf_len = src_len;
     conn->wbuf_off = 0;
+    txn_record(client, src_buf, src_len);
 
     if (client->using_pbuf) {
         client->cmd_remaining = 0;
@@ -437,6 +489,13 @@ void handle_backend_readable(Worker *w, PoolConn *conn) {
     }
     if (conn->fanout_sub) {
         handle_fanout_sub_readable(w, conn);
+        return;
+    }
+    /* A transaction request in flight on its pinned connection (anything
+     * else on it -- an ACL user's ordinary command, or EOF on an idle pinned
+     * connection -- takes the usual paths below). */
+    if (conn->txn_client && conn->txn_client->txn_op != TXN_OP_NONE && !conn->acl_authenticating) {
+        txn_conn_readable(w, conn);
         return;
     }
     if (conn->pool->type == POOL_SUBSCRIPTION) {
@@ -558,10 +617,11 @@ void handle_client_writable(Worker *w, ClientConn *client) {
 }
 
 /* ── inline protocol ────────────────────────────────────────────────── */
-/* Like predixy, only these few connection-level commands may be sent in the
- * inline (telnet-style) protocol; anything else must use RESP. */
-static const char *INLINE_CMDS[] = {"AUTH", "ECHO", "PING", "QUIT", "SELECT", NULL};
-#define INLINE_MAX_ARGS 8
+/* Any command may be sent inline (telnet-style): the line is rewritten to
+ * RESP and takes the same path as any other command. A line is at most
+ * HDR_BUF_SIZE bytes, and every argument takes at least one byte plus a
+ * separator, so this many arguments always fit. */
+#define INLINE_MAX_ARGS (HDR_BUF_SIZE / 2 + 1)
 
 /* Split an inline command line in place following valkey's sdssplitargs()
  * rules: whitespace-separated, "..." with \n \r \t \b \a \xHH escapes, and
@@ -648,8 +708,8 @@ static int client_inline_to_resp(Worker *w, ClientConn *client) {
     client->hbuf_len = 0;
     if (linelen > 0 && client->hbuf[linelen - 1] == '\r') linelen--;
 
-    const char *argv[INLINE_MAX_ARGS];
-    int argl[INLINE_MAX_ARGS];
+    static __thread const char *argv[INLINE_MAX_ARGS];
+    static __thread int argl[INLINE_MAX_ARGS];
     int argc = inline_split_args(client->hbuf, linelen, argv, argl, INLINE_MAX_ARGS);
     if (argc < 0) {
         client_send_error(w, client, "Protocol error: unbalanced quotes in request");
@@ -658,25 +718,10 @@ static int client_inline_to_resp(Worker *w, ClientConn *client) {
     }
     if (argc == 0) return 0; /* empty line: ignored, like valkey does */
 
-    char name[16];
-    int namelen = argl[0] < (int)sizeof(name) - 1 ? argl[0] : (int)sizeof(name) - 1;
-    memcpy(name, argv[0], (size_t)namelen);
-    name[namelen] = '\0';
-    str_toupper(name);
-    if (argl[0] != namelen || !cmd_in_list(name, INLINE_CMDS)) {
-        client_send_error(w, client, "inline protocol only supports PING, ECHO, AUTH, SELECT and QUIT");
-        return 0;
-    }
-    if (argc > INLINE_MAX_ARGS) {
-        char msg[64];
-        for (char *p = name; *p; p++) *p = (char)tolower((unsigned char)*p);
-        snprintf(msg, sizeof(msg), "wrong number of arguments for '%s' command", name);
-        client_send_error(w, client, msg);
-        return 0;
-    }
-
+    /* The name is passed through as typed: an unsupported one is turned
+     * away by cmd_is_supported() like any RESP command. */
     int resp_len;
-    char *resp = build_resp_cmd(name, namelen, argv + 1, argl + 1, argc - 1, &resp_len);
+    char *resp = build_resp_cmd(argv[0], argl[0], argv + 1, argl + 1, argc - 1, &resp_len);
     if (!resp || resp_len > HDR_BUF_SIZE) {
         free(resp);
         client_send_error(w, client, resp ? "command header too large" : "out of memory");
@@ -793,6 +838,7 @@ static void client_process_input(Worker *w, ClientConn *client) {
                 close_client(w, client);
                 return;
             }
+            txn_record(client, conn->wbuf + conn->wbuf_len, (int)n);
             conn->wbuf_len += (int)n;
             client->cmd_remaining -= n;
         }
@@ -858,8 +904,11 @@ static void client_process_input(Worker *w, ClientConn *client) {
             char cmd2[64] = "", key2[512] = "";
             int cl2 = 0, kl2 = 0, ac2 = 0, tc2 = 0;
             resp_parse_header(client->pbuf, client->pbuf_len, cmd2, &cl2, key2, &kl2, &ac2, &tc2);
+            str_toupper(cmd2);
             PoolType pt2 = cmd_get_pool_type(cmd2);
-            if (pt2 == POOL_BLOCKING)
+            if (client->in_transaction || pt2 == POOL_TRANSACTION)
+                txn_buffered_complete(w, client, cmd2);
+            else if (pt2 == POOL_BLOCKING)
                 handle_blocking_complete(w, client, cmd2);
             else if (pt2 == POOL_ACL)
                 handle_auth_cmd(w, client);
@@ -913,6 +962,7 @@ static void client_process_input(Worker *w, ClientConn *client) {
     if (client_trim_hbuf(w, client, total_cmd_len) < 0) return;
 
     str_toupper(cmd);
+    txn_reconcile(w, client);
 
     /* Must come before route_command(), which has side effects: a command
      * held back by the barrier is parsed again from scratch later. */
@@ -936,8 +986,9 @@ static void client_process_input(Worker *w, ClientConn *client) {
     client->total_cmd_len = total_cmd_len;
 
     if (!cmd_is_supported(cmd)) {
-        client_send_error(w, client, "unsupport command");
-        client->hbuf_len = 0;
+        /* Inside MULTI this fails the transaction, as on Valkey. */
+        if (client->in_transaction) client->txn_dirty = 1;
+        client_reject_error(w, client, "unsupport command");
         return;
     }
 
@@ -984,11 +1035,14 @@ static void client_process_input(Worker *w, ClientConn *client) {
     client->last_interaction = time(NULL);
     record_last_cmd(client, cmd, key, keylen);
 
-    if (!strcmp(cmd, "WATCH")) {
-        client->watch_count += (argc > 1 ? argc - 1 : 0);
-    } else if (!strcmp(cmd, "UNWATCH") || !strcmp(cmd, "EXEC") || !strcmp(cmd, "DISCARD")) {
-        client->watch_count = 0;
-    } else if (!strcmp(cmd, "SUBSCRIBE") || !strcmp(cmd, "PSUBSCRIBE") || !strcmp(cmd, "SSUBSCRIBE")) {
+    /* MULTI / EXEC / DISCARD / WATCH / UNWATCH, and every command inside
+     * MULTI: src/txn.c owns all of them, the multi=/watch= counters too. */
+    if (pt == POOL_TRANSACTION || client->in_transaction) {
+        txn_dispatch(w, client, cmd, key, keylen, argc);
+        return;
+    }
+
+    if (!strcmp(cmd, "SUBSCRIBE") || !strcmp(cmd, "PSUBSCRIBE") || !strcmp(cmd, "SSUBSCRIBE")) {
         int *n = !strcmp(cmd, "SUBSCRIBE")    ? &client->sub_count
                  : !strcmp(cmd, "PSUBSCRIBE") ? &client->psub_count
                                               : &client->ssub_count;
@@ -1145,8 +1199,7 @@ static void client_process_input(Worker *w, ClientConn *client) {
         }
 
         if (keylen == 0) {
-            client_send_error(w, client, "missing key");
-            client->hbuf_len = 0;
+            client_reject_error(w, client, "missing key");
             return;
         }
         int slot = key_slot(key, keylen);
@@ -1160,8 +1213,7 @@ static void client_process_input(Worker *w, ClientConn *client) {
              * client here would turn an ordinary "try again in a moment"
              * into every long-lived client (e.g. a benchmark tool holding
              * one connection open) getting disconnected on every failover. */
-            client_send_error(w, client, "slot not mapped");
-            client->hbuf_len = 0;
+            client_reject_error(w, client, "slot not mapped");
             return;
         }
         client->node_idx = node_idx;

@@ -508,6 +508,7 @@ void handle_hello_auth_reply(Worker *w, PoolConn *conn, ClientConn *cl, int rlen
      * it afterwards rather than trusting `conn`. It stays pinned to cl
      * (waiting_client) from now on, exactly like an AUTH login probe. */
     int ni = conn->pool->node_idx;
+    txn_identity_changed(w, cl);
     acl_teardown_all(w, cl);
     conn = cl->hello_auth_conn;
     cl->hello_auth_conn = NULL;

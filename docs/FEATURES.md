@@ -156,7 +156,8 @@ directly affect command behavior are listed here:
 | `min_normal_connection` / `max_normal_connection` | 2 / 20 | Pool used by the vast majority of read/write commands |
 | `min_blocking_connection` / `max_blocking_connection` | 2 / 10 | `BLPOP` and other blocking commands |
 | `min_subscription_connection` / `max_subscription_connection` | 0 / 10 | Pub/Sub |
-| `min_transaction_connection` / `max_transaction_connection` | 0 / 10 | Capacity settings exist for the transaction pool |
+| `min_transaction_connection` / `max_transaction_connection` | 0 / 10 | Connections pinned by transactions (see §8); when all are in use, further transactions wait for one |
+| `transaction_replay_buffer_size` | 1048576 | Most bytes of queued commands kept per transaction for replaying it on the new node after `-MOVED` (see §8); 0 disables replay |
 | `min_acl_connection` / `max_acl_connection` | 0 / 10 | `ACL`/`AUTH`, plus each authenticated client's dedicated per-node connections |
 | `cluster_refresh_interval_ms` | 0 (disabled) | Whether/how often the cluster topology is refreshed in the background |
 | `max_connection` | 4000 | Per-worker-thread fd budget (client sockets + backend connections + listener fd(s)) |
@@ -179,3 +180,46 @@ With `backend_multiplexing yes` (the default):
 `PROXY POOLS` reports the shared pool as `pool_db<N>_n<N>_shared`, where `open` is the number of connected shared connections and `in_use` the number of requests currently in flight on them.
 
 With `backend_multiplexing no`, every command is handled one at a time per client on a connection checked out of the normal pool, as before.
+
+## 8. Transactions
+
+`MULTI` / `EXEC` / `DISCARD` / `WATCH` / `UNWATCH` work as on a Valkey cluster: a transaction runs
+on one backend connection, pinned to the client from its first `WATCH` or first queued command until
+`EXEC`, `DISCARD` or `UNWATCH`.
+
+- **One slot**: every key in the transaction, including `WATCH`ed keys, must hash to the same slot.
+  The first key used picks the slot and its node. A command with a key in another slot gets
+  `-CROSSSLOT`.
+- **What can be queued**: commands with keys (single-key, same-slot multi-key such as `MGET`/`MSET`/`DEL`,
+  blocking commands, `EVAL`/`FCALL` with keys). Once the node is known, `PING`, `ECHO`, `TIME`,
+  `UNWATCH` and `EVAL`/`FCALL` with no keys can be queued too. Anything else (`SCAN`, `KEYS`, `INFO`,
+  `CLIENT`, `SELECT`, `HELLO`, `AUTH`, `ACL`, Pub/Sub, ...) gets an error.
+- **Rejected commands**: a command rejected inside `MULTI`, by the proxy or by the backend, fails the
+  transaction, and `EXEC` returns `-EXECABORT Transaction discarded because of previous errors.`.
+  Errors raised while `EXEC` runs (for example `-WRONGTYPE`) come back as elements of `EXEC`'s array,
+  as on Valkey.
+- **`MULTI` is sent late**: the proxy answers `MULTI` itself and sends it to the backend just before
+  the first queued command (or `EXEC`), as a separate request.
+- **Lost connection**: if the pinned connection breaks, a `WATCH` on it is lost and `EXEC` returns nil
+  (the client retries, as after any `WATCH` abort); a `MULTI` on it fails and `EXEC` returns
+  `-EXECABORT`.
+- **Slot moved (`-MOVED`)**: commands keep going to the node picked at the start. If the slot has
+  moved since, the backend answers `-MOVED`, having run nothing. A transaction without `WATCH` is
+  then replayed on the new node from the queued commands, and the client sees the normal replies.
+  Replay is skipped, and the `-MOVED` returned, when the transaction has more than
+  `transaction_replay_buffer_size` bytes of queued commands, the new node isn't in the proxy's
+  topology yet, or it has already been redirected twice. With `WATCH`, `EXEC` returns nil instead.
+  `-ASK` and `-TRYAGAIN` (a slot migration in progress) are returned as-is.
+- **RESP3**: a RESP2 client gets each element of `EXEC`'s reply converted like the reply to the
+  command queued in its position.
+- **ACL users** run their transactions on their own per-node connections instead of the transaction
+  pool.
+- `CLIENT INFO` / `CLIENT LIST` show `flags=x` and `multi=<queued count>` inside `MULTI`, and
+  `watch=<key count>` after `WATCH`.
+
+Known limitations:
+
+- A client that `WATCH`es and never runs `EXEC`/`DISCARD`/`UNWATCH` keeps a transaction-pool
+  connection until it disconnects.
+- For a multi-key command with more than 512 keys inside `MULTI`, the proxy checks only the first
+  512 keys' slots; a later key in another slot is caught by the backend's `-CROSSSLOT`.
