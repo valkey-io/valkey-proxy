@@ -422,7 +422,8 @@ These commands require the Search module (valkey-search) to be loaded on every b
 
 | Command | Notes |
 |---|---|
-| `CLUSTER KEYSLOT` | Answered by proxy. Other `CLUSTER` subcommands are still unsupported |
+| `CLUSTER KEYSLOT` | Answered by proxy |
+| `CLUSTER SLOTS` | Forwarded to one primary node; the backend's reply (real cluster topology) is relayed as-is |
 
 ## Unsupported commands
 
@@ -459,7 +460,6 @@ These commands require the Search module (valkey-search) to be loaded on every b
 | `CLUSTER SHARDS` | |
 | `CLUSTER SLAVES` | |
 | `CLUSTER SLOT-STATS` | |
-| `CLUSTER SLOTS` | |
 | `CLUSTER SYNCSLOTS` | |
 | `CLUSTERSCAN` | |
 | `READONLY` | |

@@ -2919,15 +2919,52 @@ void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen) {
     client->hbuf_len = 0;
 }
 
-/* CLUSTER — only KEYSLOT is supported, answered locally with key_slot()
- * (cluster.c). Every other subcommand gets the same error as any other
- * unsupported command and never reaches a backend. */
+/* CLUSTER — KEYSLOT is answered locally with key_slot() (cluster.c);
+ * SLOTS is forwarded verbatim to one master node and the backend's raw
+ * reply (the real cluster topology) is relayed back unchanged. Every other
+ * subcommand gets the same error as any other unsupported command and
+ * never reaches a backend. */
 void handle_cluster_cmd(Worker *w, ClientConn *client, int cmdlen) {
     (void)cmdlen;
     const char *sub;
     int sublen;
-    if (!resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen) || sublen != 7 ||
-        strncasecmp(sub, "KEYSLOT", 7) != 0) {
+    if (!resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen)) {
+        client_send_error(w, client, "unsupport command");
+        client->hbuf_len = 0;
+        return;
+    }
+
+    if (sublen == 5 && strncasecmp(sub, "SLOTS", 5) == 0) {
+        const char *extra;
+        int extralen;
+        if (resp_get_nth_arg(client->hbuf, client->hbuf_len, 2, &extra, &extralen)) {
+            client_send_error(w, client, "wrong number of arguments for 'cluster|slots' command");
+            client->hbuf_len = 0;
+            return;
+        }
+        int ni = topo_first_master(w);
+        DbGroup *grp = db_group_get(w, client->db);
+        if (!grp) {
+            client_send_error(w, client, "db group error");
+            close_client(w, client);
+            return;
+        }
+        ConnPool *pool = &grp->node_pools[ni].pools[POOL_NORMAL];
+        PoolConn *conn = pool_acquire_nb(w, pool);
+        if (!conn) {
+            client->node_idx = ni;
+            client->state = CS_WAITING_CONN;
+            fd_unwatch(w, client->fd, EL_READABLE);
+            pool_enqueue_waiter(pool, client);
+            return;
+        }
+        conn->waiting_client = client;
+        client->pending_conn = conn;
+        resume_client_after_conn(w, client, conn);
+        return;
+    }
+
+    if (sublen != 7 || strncasecmp(sub, "KEYSLOT", 7) != 0) {
         client_send_error(w, client, "unsupport command");
         client->hbuf_len = 0;
         return;
