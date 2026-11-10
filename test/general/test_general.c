@@ -813,6 +813,19 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
     CHECK(r[0] == '-', "CLUSTER KEYSLOT: missing key returns an error", pass, fail);
     proxy_cmd(fd, r, sizeof(r), 4, "CLUSTER", "KEYSLOT", "a", "b");
     CHECK(r[0] == '-', "CLUSTER KEYSLOT: extra argument returns an error", pass, fail);
+    /* CLUSTER SLOTS: forwarded to one master, backend reply relayed as-is */
+    {
+        static char slots[65536];
+        int n = resp_send_raw_reply(fd, slots, sizeof(slots), 2, "CLUSTER", "SLOTS");
+        CHECK(n > 0 && slots[0] == '*' && strncmp(slots, "*0\r\n", 4) != 0,
+              "CLUSTER SLOTS: returns a non-empty array", pass, fail);
+        CHECK(n > 0 && strstr(slots, ":0\r\n") && strstr(slots, ":16383\r\n"),
+              "CLUSTER SLOTS: covers slot 0 and slot 16383", pass, fail);
+        n = resp_send_raw_reply(fd, slots, sizeof(slots), 2, "cluster", "slots");
+        CHECK(n > 0 && slots[0] == '*', "CLUSTER SLOTS: case-insensitive", pass, fail);
+    }
+    proxy_cmd(fd, r, sizeof(r), 3, "CLUSTER", "SLOTS", "x");
+    CHECK(r[0] == '-', "CLUSTER SLOTS: extra argument returns an error", pass, fail);
     proxy_cmd(fd, r, sizeof(r), 2, "CLUSTER", "NODES");
     CHECK(strstr(r, "unsupport command") != NULL, "CLUSTER NODES: still unsupported", pass, fail);
     proxy_cmd(fd, r, sizeof(r), 2, "CLUSTER", "INFO");
