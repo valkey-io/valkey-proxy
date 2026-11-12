@@ -22,6 +22,15 @@ make format-check  # fail if any file is not formatted (for CI)
 git config blame.ignoreRevsFile .git-blame-ignore-revs   # skip the bulk-format commit in git blame
 ```
 
+### Regenerating the ACL CAT table
+
+`ACL CAT [category]` is answered by the proxy from `src/acl_cat_data.h`, which lists only the commands `docs/COMMANDS.md` marks as supported. After adding a command to `COMMANDS.md`, regenerate it against a Valkey node that loads the bloom/json/search modules (Python 3, standard library only), then rebuild:
+
+```bash
+tools/gen_acl_cat.py --host <valkey-host> --port <port>
+make
+```
+
 ## Configuration
 Create a `proxy.conf` file before starting the proxy. All four parameters are required:
 

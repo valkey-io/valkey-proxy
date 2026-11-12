@@ -323,7 +323,7 @@ The list below covers every supported command.
 
 | Command | Notes |
 |---|---|
-| `ACL CAT` | Planned |
+| `ACL CAT` | Answered by proxy from a built-in table that lists only the commands this proxy supports; never sent to a backend, so it is not subject to the user's ACL permissions |
 | `ACL DRYRUN` | Forwarded to one primary node |
 | `ACL GETUSER` | Forwarded to one primary node |
 | `ACL HELP` | Answered by proxy |

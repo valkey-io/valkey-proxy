@@ -13,9 +13,12 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
     char r[1024];
 
     /* ── ACL HELP (forwarded to a backend node; on success the proxy
-     * substitutes its own fixed 13-line help array) ────────────────────── */
+     * substitutes its own fixed 16-line help array) ────────────────────── */
     static const char *help_lines[] = {
         "ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "CAT [<category>]",
+        "    List all commands that belong to <category>, or all command categories",
+        "    when no category is specified.",
         "DRYRUN <username> <command> [<arg> ...]",
         "    Returns whether the user can execute the given command without executing the command.",
         "GETUSER <username>",
@@ -30,7 +33,7 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         "    Print this help.",
     };
     proxy_cmd(fd, r, sizeof(r), 2, "ACL", "HELP");
-    CHECK(strcmp(r, "*13") == 0, "ACL HELP: returns the 13-line help array", pass, fail);
+    CHECK(strcmp(r, "*16") == 0, "ACL HELP: returns the 16-line help array", pass, fail);
     if (r[0] == '*') {
         int n = atoi(r + 1);
         int matched = 1;
@@ -75,11 +78,56 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd, r, sizeof(r), 5, "ACL", "DRYRUN", "default", "GET", "tc:acl:dryrun");
     CHECK(strcmp(r, "+OK") == 0, "ACL DRYRUN default GET: reports the command is allowed", pass, fail);
 
+    /* ── ACL CAT [category] — answered by the proxy from its built-in table
+     * (src/acl_cat_data.h), listing only commands the proxy supports. ──── */
+    proxy_cmd(fd, r, sizeof(r), 2, "ACL", "CAT");
+    CHECK(r[0] == '*' && atoi(r + 1) > 0, "ACL CAT: returns the category list", pass, fail);
+    if (r[0] == '*') {
+        int n = atoi(r + 1), has_string = 0, has_connection = 0;
+        for (int i = 0; i < n; i++) {
+            resp_next_str(fd, r, sizeof(r));
+            if (!strcmp(r, "string")) has_string = 1;
+            if (!strcmp(r, "connection")) has_connection = 1;
+        }
+        CHECK(has_string && has_connection, "ACL CAT: lists the string and connection categories", pass, fail);
+    }
+    proxy_cmd(fd, r, sizeof(r), 3, "ACL", "CAT", "StrInG");
+    CHECK(r[0] == '*' && atoi(r + 1) > 0, "ACL CAT StrInG: category name is case-insensitive", pass, fail);
+    if (r[0] == '*') {
+        int n = atoi(r + 1), has_get = 0, has_set = 0;
+        for (int i = 0; i < n; i++) {
+            resp_next_str(fd, r, sizeof(r));
+            if (!strcmp(r, "get")) has_get = 1;
+            if (!strcmp(r, "set")) has_set = 1;
+        }
+        CHECK(has_get && has_set, "ACL CAT string: lists get and set", pass, fail);
+    }
+    proxy_cmd(fd, r, sizeof(r), 3, "ACL", "CAT", "admin");
+    CHECK(r[0] == '*', "ACL CAT admin: returns an array", pass, fail);
+    if (r[0] == '*') {
+        int n = atoi(r + 1), has_unsupported = 0, has_supported = 0;
+        for (int i = 0; i < n; i++) {
+            resp_next_str(fd, r, sizeof(r));
+            if (!strcmp(r, "acl|setuser") || !strcmp(r, "client|kill")) has_unsupported = 1;
+            if (!strcmp(r, "acl|list")) has_supported = 1;
+        }
+        CHECK(has_supported && !has_unsupported,
+              "ACL CAT admin: lists acl|list but not unsupported acl|setuser / client|kill", pass, fail);
+    }
+    proxy_cmd(fd, r, sizeof(r), 3, "ACL", "CAT", "tc-nosuchcat");
+    CHECK(strcmp(r, "-ERR Unknown category 'tc-nosuchcat'") == 0, "ACL CAT unknown category: -ERR Unknown category",
+          pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 4, "ACL", "CAT", "string", "extra");
+    CHECK(r[0] == '-' && strstr(r, "wrong number of arguments") != NULL, "ACL CAT with 2 arguments: rejected", pass,
+          fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "PING", "tc-after-acl-cat");
+    CHECK(strcmp(r, "tc-after-acl-cat") == 0, "ACL CAT: connection still in sync afterwards", pass, fail);
+
     /* ── unsupported ACL subcommand — must be rejected locally by the
      * proxy, without ever reaching a backend node. ─────────────────────── */
-    proxy_cmd(fd, r, sizeof(r), 2, "ACL", "CAT");
+    proxy_cmd(fd, r, sizeof(r), 2, "ACL", "SETUSER");
     CHECK(r[0] == '-' && strstr(r, "unknown ACL subcommand") != NULL,
-          "ACL CAT: unsupported subcommand rejected locally", pass, fail);
+          "ACL SETUSER: unsupported subcommand rejected locally", pass, fail);
 
     /* ── bare ACL (no subcommand) — must be rejected with an error ───────── */
     proxy_cmd(fd, r, sizeof(r), 1, "ACL");
@@ -137,6 +185,13 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         proxy_cmd(fa, r, sizeof(r), 3, "SET", "tc:acl:auth", "v-denied");
         CHECK(strncmp(r, "-NOPERM", 7) == 0, "AUTH read-only user: SET is -NOPERM (runs as that user, not default)",
               pass, fail);
+        /* ACL CAT never reaches a backend, so even a restricted user gets it. */
+        proxy_cmd(fa, r, sizeof(r), 3, "ACL", "CAT", "string");
+        CHECK(r[0] == '*' && atoi(r + 1) > 0, "AUTH read-only user: ACL CAT answered by the proxy", pass, fail);
+        if (r[0] == '*') {
+            int n = atoi(r + 1);
+            for (int i = 0; i < n; i++) resp_skip_reply(fa);
+        }
 
         proxy_cmd(fa, r, sizeof(r), 3, "AUTH", "default", "x");
         CHECK(strcmp(r, "+OK") == 0, "AUTH default after a real user: +OK", pass, fail);
