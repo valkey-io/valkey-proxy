@@ -316,6 +316,53 @@ void run_geospatial_tests(const char *host, int port, int *pass, int *fail) {
         }
     }
 
+    /* BYPOLYGON (Valkey 9.0+): quadrilateral around Sicily → the 3 Sicilian
+     * cities, Paris excluded. The proxy forwards the vertices untouched. */
+    resp_send(fd, 12, "GEOSEARCH", "tc:geo:cities", "BYPOLYGON", "4", "12", "36.5", "16", "36.5", "16", "38.5", "12",
+              "38.5");
+    resp_next_str(fd, r, sizeof(r));
+    {
+        int n = atoi(r + 1);
+        CHECK(strcmp(r, "*3") == 0, "GEOSEARCH BYPOLYGON 4 vertices: returns 3 Sicilian cities", pass, fail);
+        int has_paris = resp_array_contains(fd, n, "Paris");
+        CHECK(!has_paris, "GEOSEARCH BYPOLYGON 4 vertices: Paris excluded", pass, fail);
+    }
+
+    /* BYPOLYGON triangle: only Catania lies inside */
+    resp_send(fd, 10, "GEOSEARCH", "tc:geo:cities", "BYPOLYGON", "3", "14.5", "37", "16", "37", "16", "38.5");
+    resp_next_str(fd, r, sizeof(r));
+    CHECK(strcmp(r, "*1") == 0, "GEOSEARCH BYPOLYGON triangle: returns *1 array", pass, fail);
+    resp_next_str(fd, r, sizeof(r));
+    CHECK(strcmp(r, "Catania") == 0, "GEOSEARCH BYPOLYGON triangle: member is Catania", pass, fail);
+
+    /* BYPOLYGON + WITHCOORD: [name, [lon, lat]] */
+    resp_send(fd, 11, "GEOSEARCH", "tc:geo:cities", "BYPOLYGON", "3", "14.5", "37", "16", "37", "16", "38.5",
+              "WITHCOORD");
+    resp_next_str(fd, r, sizeof(r));
+    CHECK(strcmp(r, "*1") == 0, "GEOSEARCH BYPOLYGON WITHCOORD: returns *1 array", pass, fail);
+    {
+        resp_next_str(fd, r, sizeof(r)); /* *2 sub-array */
+        CHECK(strcmp(r, "*2") == 0, "GEOSEARCH BYPOLYGON WITHCOORD: result is *2 sub-array", pass, fail);
+        resp_next_str(fd, r, sizeof(r)); /* member name */
+        CHECK(strcmp(r, "Catania") == 0, "GEOSEARCH BYPOLYGON WITHCOORD: member is Catania", pass, fail);
+        resp_next_str(fd, r, sizeof(r)); /* *2 coord pair */
+        resp_next_str(fd, r, sizeof(r));
+        resp_next_str(fd, r2, sizeof(r2));
+        double lon = atof(r), lat = atof(r2);
+        CHECK(lon > 15.08 && lon < 15.09 && lat > 37.50 && lat < 37.51,
+              "GEOSEARCH BYPOLYGON WITHCOORD: Catania coordinates", pass, fail);
+    }
+
+    /* BYPOLYGON with fewer than 3 vertices → backend error relayed */
+    proxy_cmd(fd, r, sizeof(r), 8, "GEOSEARCH", "tc:geo:cities", "BYPOLYGON", "2", "14.5", "37", "16", "37");
+    CHECK(r[0] == '-' && strstr(r, "at least 3 vertices") != NULL, "GEOSEARCH BYPOLYGON 2 vertices: returns error",
+          pass, fail);
+
+    /* BYPOLYGON cannot be combined with FROMLONLAT/FROMMEMBER */
+    proxy_cmd(fd, r, sizeof(r), 13, "GEOSEARCH", "tc:geo:cities", "FROMLONLAT", "15", "37", "BYPOLYGON", "3", "14.5",
+              "37", "16", "37", "16", "38.5");
+    CHECK(r[0] == '-', "GEOSEARCH FROMLONLAT + BYPOLYGON: returns error", pass, fail);
+
     /* ── GEOSEARCHSTORE ───────────────────────────────────────────────────── */
 
     /* same-slot keys (both use hash tag {geo}) */
@@ -327,6 +374,18 @@ void run_geospatial_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd, r, sizeof(r), 10, "GEOSEARCHSTORE", "{other}:result", "{geo}:cities", "FROMLONLAT", "15", "37",
               "BYRADIUS", "200", "km", "ASC");
     CHECK(strstr(r, "CROSSSLOT") != NULL, "GEOSEARCHSTORE cross-slot: returns CROSSSLOT error", pass, fail);
+
+    /* BYPOLYGON, same slot: all 3 cities of {geo}:cities are inside */
+    proxy_cmd(fd, r, sizeof(r), 13, "GEOSEARCHSTORE", "{geo}:polyresult", "{geo}:cities", "BYPOLYGON", "4", "12",
+              "36.5", "16", "36.5", "16", "38.5", "12", "38.5");
+    CHECK(strcmp(r, ":3") == 0, "GEOSEARCHSTORE BYPOLYGON same slot: stores 3 members", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "ZCARD", "{geo}:polyresult");
+    CHECK(strcmp(r, ":3") == 0, "GEOSEARCHSTORE BYPOLYGON: destination has 3 members", pass, fail);
+
+    /* BYPOLYGON, different slot → CROSSSLOT error */
+    proxy_cmd(fd, r, sizeof(r), 13, "GEOSEARCHSTORE", "{other}:polyresult", "{geo}:cities", "BYPOLYGON", "4", "12",
+              "36.5", "16", "36.5", "16", "38.5", "12", "38.5");
+    CHECK(strstr(r, "CROSSSLOT") != NULL, "GEOSEARCHSTORE BYPOLYGON cross-slot: returns CROSSSLOT error", pass, fail);
 
     proxy_cmd(fd, r, sizeof(r), 1, "FLUSHDB");
     close(fd);
