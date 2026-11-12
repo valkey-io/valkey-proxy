@@ -76,8 +76,8 @@ The list below covers every supported command.
 | `GEORADIUSBYMEMBER` | With `STORE`/`STOREDIST`, the source key and the store key must hash to the same slot, otherwise the proxy returns `-CROSSSLOT` without contacting a backend |
 | `GEORADIUSBYMEMBER_RO` | |
 | `GEORADIUS_RO` | |
-| `GEOSEARCH` | |
-| `GEOSEARCHSTORE` | The destination and source keys must hash to the same slot, otherwise the proxy returns `-CROSSSLOT` without contacting a backend |
+| `GEOSEARCH` | `BYPOLYGON` (Valkey 9.0+) is forwarded as-is; requires a backend that supports it |
+| `GEOSEARCHSTORE` | The destination and source keys must hash to the same slot, otherwise the proxy returns `-CROSSSLOT` without contacting a backend. `BYPOLYGON` (Valkey 9.0+) is forwarded as-is |
 
 ### Hash
 
