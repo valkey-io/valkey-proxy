@@ -249,6 +249,7 @@ void client_recover_after_backend_error(Worker *w, ClientConn *client, PoolConn 
     /* A failed HELLO ... AUTH login probe just fails the whole HELLO. */
     if (conn == client->hello_auth_conn) hello_auth_conn_forget(client);
     client_send_error(w, client, msg);
+    client->admin_probe = 0;
     client->pending_conn = NULL;
     client->hbuf_len = 0;
     client->pbuf_len = 0;

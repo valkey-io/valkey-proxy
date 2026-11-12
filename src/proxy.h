@@ -346,6 +346,11 @@ struct ClientConn {
     PoolConn *acl_conns[MAX_NODES]; /* per-node pinned, authenticated conn;
                                             NULL = not yet connected to that node */
     int waiting_acl_help;           /* 1 = pending reply is an ACL HELP probe */
+    /* Admin check for CLIENT LIST / PROXY POOLS / PROXY INFO (see acl.c):
+     * admin_probe = the pending reply is the permission probe, sent from
+     * pbuf while the command itself waits in hbuf, run again once the probe
+     * allows it with admin_passed set so it isn't checked twice. */
+    int admin_probe, admin_passed;
     /* ── RESP protocol version (see src/hello.c) ────────────────────────── */
     int resp; /* 2 or 3; set at accept() time, changed by HELLO */
 #ifdef USE_TLS
@@ -409,6 +414,19 @@ typedef struct {
     int version;
 } TopoSnapshot;
 
+/* A user's answer to the admin check (see acl.c): allowed, or the
+ * -NOPERM reply to send, until until_us. */
+#define ADMIN_CACHE_SIZE   16
+#define ADMIN_CACHE_TTL_US (5 * 1000000ULL)
+typedef struct {
+    char user[64];
+    int userlen;
+    int allowed;
+    char err[256];
+    int errlen;
+    uint64_t until_us;
+} AdminCheck;
+
 /* ── worker ─────────────────────────────────────────────────────────── */
 typedef struct {
     int thread_id;
@@ -468,6 +486,7 @@ typedef struct {
     /* 0 until worker_thread() is watching handoff_r (1) or has given up
      * during setup (-1); the main thread hands this worker nothing until 1. */
     atomic_int handoff_ready;
+    AdminCheck admin_cache[ADMIN_CACHE_SIZE];
 } Worker;
 
 typedef struct {
@@ -827,6 +846,7 @@ void acl_teardown_all(Worker *w, ClientConn *client);
 void handle_acl_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_acl_cat(Worker *w, ClientConn *client);
 void handle_acl_help_readable(Worker *w, PoolConn *conn);
+int acl_admin_check(Worker *w, ClientConn *client);
 
 /* ── transactions (see src/txn.c) ─────────────────────────────────────── */
 /* Handles a command while the client is in MULTI, or one of MULTI / EXEC /
