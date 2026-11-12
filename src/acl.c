@@ -46,6 +46,7 @@ static void acl_reply_ok(Worker *w, ClientConn *client) {
 
 static void acl_soft_fail(Worker *w, ClientConn *client, const char *msg) {
     client_send_error(w, client, msg);
+    client->admin_probe = 0;
     client->pbuf_len = 0;
     client->hbuf_len = 0;
     client->using_pbuf = 0;
@@ -426,6 +427,116 @@ void handle_acl_help_readable(Worker *w, PoolConn *conn) {
     send_multibulk_reply(w, cl, lines, (int)(sizeof(lines) / sizeof(lines[0])));
 }
 
+/* ── Admin check for CLIENT LIST, PROXY POOLS and PROXY INFO ──────────
+ * The proxy answers these itself, so Valkey's ACL never sees them. For a
+ * client logged in as a non-default user, ask Valkey instead: send a
+ * CLIENT LIST that matches no client on the user's own connection. Valkey
+ * checks permissions before it runs a command, so -NOPERM means the user
+ * may not run CLIENT LIST, and anything else means it may. All three
+ * commands need that same permission. The answer is kept per user on this
+ * worker for ADMIN_CACHE_TTL_US, so polling doesn't probe every time.
+ * Default-identity clients aren't checked. */
+static const char ADMIN_PROBE[] = "*4\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$2\r\nID\r\n$19\r\n9223372036854775807\r\n";
+
+static AdminCheck *admin_cache_find(Worker *w, const ClientConn *client) {
+    for (int i = 0; i < ADMIN_CACHE_SIZE; i++) {
+        AdminCheck *e = &w->admin_cache[i];
+        if (e->until_us && e->userlen == client->acl_userlen && !memcmp(e->user, client->acl_user, (size_t)e->userlen))
+            return e;
+    }
+    return NULL;
+}
+
+/* Returns 1 if the caller may answer now. Returns 0 if the client has been
+ * answered with -NOPERM, or a probe is on its way and the command runs
+ * again once it's back (see admin_probe_done()). */
+int acl_admin_check(Worker *w, ClientConn *client) {
+    if (!client->acl_authenticated) return 1;
+    if (client->admin_passed) {
+        client->admin_passed = 0;
+        return 1;
+    }
+    AdminCheck *e = admin_cache_find(w, client);
+    if (e && e->until_us > mono_us()) {
+        if (e->allowed) return 1;
+        client_send_raw(client, e->err, e->errlen);
+        client->hbuf_len = 0;
+        return 0;
+    }
+    int len = (int)sizeof(ADMIN_PROBE) - 1;
+    if (client->pbuf_cap < len) {
+        char *tmp = realloc(client->pbuf, (size_t)len);
+        if (!tmp) {
+            client_send_error(w, client, "out of memory");
+            client->hbuf_len = 0;
+            return 0;
+        }
+        client->pbuf = tmp;
+        client->pbuf_cap = len;
+    }
+    memcpy(client->pbuf, ADMIN_PROBE, (size_t)len);
+    client->pbuf_len = len;
+    client->using_pbuf = 1;
+    client->admin_probe = 1;
+    acl_route_business_cmd(w, client, topo_first_master(w));
+    return 0;
+}
+
+/* handle_acl_conn_readable()'s branch for the admin check's probe reply. */
+static void admin_probe_done(Worker *w, PoolConn *conn, ClientConn *cl, int rlen) {
+    int denied = rlen >= 7 && !memcmp(conn->rbuf, "-NOPERM", 7);
+    /* Another error (e.g. -LOADING) says nothing about permissions: let
+     * this command through, but don't remember it. */
+    if ((conn->rbuf[0] != '-' || denied) && rlen <= (int)sizeof(w->admin_cache[0].err)) {
+        AdminCheck *e = admin_cache_find(w, cl);
+        if (!e) {
+            e = &w->admin_cache[0];
+            for (int i = 1; i < ADMIN_CACHE_SIZE; i++)
+                if (w->admin_cache[i].until_us < e->until_us) e = &w->admin_cache[i];
+        }
+        memcpy(e->user, cl->acl_user, (size_t)cl->acl_userlen);
+        e->userlen = cl->acl_userlen;
+        e->allowed = !denied;
+        e->errlen = denied ? rlen : 0;
+        if (denied) memcpy(e->err, conn->rbuf, (size_t)rlen);
+        e->until_us = mono_us() + ADMIN_CACHE_TTL_US;
+    }
+
+    cl->admin_probe = 0;
+    cl->pbuf_len = 0;
+    cl->using_pbuf = 0;
+    cl->pending_conn = NULL;
+    fd_unwatch(w, conn->fd, EL_READABLE);
+
+    if (denied) {
+        int dr = deliver_backend_reply(w, cl, conn, conn->rbuf, rlen);
+        conn->rbuf_len = 0;
+        if (dr == -2) return;
+        cl->hbuf_len = 0;
+        if (dr < 0) {
+            client_send_error(w, cl, "bad backend response");
+            cl->state = CS_READING_HDR;
+            fd_watch(w, cl->fd, EL_READABLE);
+            return;
+        }
+        cl->state = CS_WRITING_RESP;
+        fd_watch(w, cl->fd, EL_WRITABLE);
+        return;
+    }
+    conn->rbuf_len = 0;
+
+    /* Run the command waiting in hbuf, as client_process_input() would. */
+    const char *name;
+    int namelen;
+    cl->state = CS_READING_HDR;
+    fd_watch(w, cl->fd, EL_READABLE);
+    cl->admin_passed = 1; /* cleared by acl_admin_check() itself */
+    if (resp_get_nth_arg(cl->hbuf, cl->hbuf_len, 0, &name, &namelen) && namelen == 6 && !strncasecmp(name, "CLIENT", 6))
+        handle_client_cmd(w, cl, cl->hbuf_len);
+    else
+        handle_proxy_cmd(w, cl, cl->hbuf_len);
+}
+
 /* handle_backend_readable()'s POOL_ACL special case. */
 void handle_acl_conn_readable(Worker *w, PoolConn *conn) {
     ClientConn *cl = conn->waiting_client;
@@ -541,6 +652,11 @@ void handle_acl_conn_readable(Worker *w, PoolConn *conn) {
             cl->pending_conn = conn;
             resume_client_after_conn(w, cl, conn);
         }
+        return;
+    }
+
+    if (cl->admin_probe) {
+        admin_probe_done(w, conn, cl, rlen);
         return;
     }
 

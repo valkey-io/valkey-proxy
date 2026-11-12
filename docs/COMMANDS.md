@@ -23,7 +23,7 @@ The list below covers every supported command.
 | `CLIENT ID` | Answered by proxy |
 | `CLIENT INFO` | Answered by proxy |
 | `CLIENT KILL` | Planned |
-| `CLIENT LIST` | Answered by proxy: the proxy's own clients on every worker thread, one `CLIENT INFO` line each. Takes the filters `CLIENT HELP` lists; `USER` doesn't check that the user exists, and `TYPE primary`/`replica` match nothing. A subscribed client gets an error, also in RESP3, where Valkey answers |
+| `CLIENT LIST` | Answered by proxy: the proxy's own clients on every worker thread, one `CLIENT INFO` line each. Takes the filters `CLIENT HELP` lists; `USER` doesn't check that the user exists, and `TYPE primary`/`replica` match nothing. A subscribed client gets an error, also in RESP3, where Valkey answers. A client logged in as a non-default user needs permission to run `CLIENT LIST` on the backend, as on Valkey |
 | `CLIENT SETNAME` | Stored on the proxy only, never sent to a backend |
 | `ECHO` | Answered by proxy |
 | `HELLO` | Answered by proxy, except the first HELLO 3 (RESP3 probe) and AUTH with a non-default user, which go to the backend. Reports mode standalone. |
@@ -351,8 +351,8 @@ The list below covers every supported command.
 | `MODULE LIST` | Forwarded to one primary node |
 | `MONITOR` | Planned |
 | `PROXY HELP` | Answered by proxy |
-| `PROXY INFO` | Each primary's own INFO reply, unmerged; `SHARD <idx>\|<ip:port>` limits it to one |
-| `PROXY POOLS` | Answered by proxy; connection pool usage per backend node and pool type |
+| `PROXY INFO` | Each primary's own INFO reply, unmerged; `SHARD <idx>\|<ip:port>` limits it to one. Needs the same permission as `CLIENT LIST` |
+| `PROXY POOLS` | Answered by proxy; connection pool usage per backend node and pool type. Needs the same permission as `CLIENT LIST` |
 | `SLOWLOG GET` | Broadcast to every primary node |
 | `SLOWLOG HELP` | Forwarded to one primary node |
 | `SLOWLOG LEN` | Broadcast to every primary node |

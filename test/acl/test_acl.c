@@ -201,4 +201,63 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         SKIP("AUTH as a real ACL user");
     }
     close(fa);
+
+    /* ── CLIENT LIST / PROXY POOLS / PROXY INFO need the permission to run
+     * CLIENT LIST, which Valkey decides for a logged-in user. ──────────── */
+    if (g_test_acl_user) {
+        const int cap = 1 << 20;
+        char *big2 = malloc((size_t)cap);
+        int fn = proxy_connect(host, port);
+        proxy_cmd(fn, r, sizeof(r), 3, "AUTH", g_test_acl_noadmin_user, g_test_acl_noadmin_pass);
+        CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH user without @admin", pass, fail);
+        proxy_cmd(fn, r, sizeof(r), 2, "CLIENT", "LIST");
+        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: CLIENT LIST without @admin is -NOPERM", pass, fail);
+        proxy_cmd(fn, r, sizeof(r), 2, "PROXY", "POOLS");
+        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: PROXY POOLS without @admin is -NOPERM", pass, fail);
+        proxy_cmd(fn, r, sizeof(r), 3, "PROXY", "INFO", "server");
+        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: PROXY INFO without @admin is -NOPERM", pass, fail);
+        /* Answered from the cache this time; the connection still works. */
+        proxy_cmd(fn, r, sizeof(r), 2, "CLIENT", "LIST");
+        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: a second CLIENT LIST is -NOPERM too", pass, fail);
+        proxy_cmd(fn, r, sizeof(r), 2, "ECHO", "still-here");
+        CHECK(strcmp(r, "still-here") == 0, "admin check: other commands still run after -NOPERM", pass, fail);
+        /* AUTH default goes back to the default identity, which isn't checked. */
+        proxy_cmd(fn, r, sizeof(r), 3, "AUTH", "default", "x");
+        int n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "CLIENT", "LIST") : -1;
+        CHECK(n > 0 && big2[0] == '$' && strstr(big2, "user=default"), "admin check: default identity isn't checked",
+              pass, fail);
+        close(fn);
+
+        const char *ok_users[2][2] = {{g_test_acl_user, g_test_acl_pass}, {g_test_acl_cl_user, g_test_acl_cl_pass}};
+        const char *ok_labels[2] = {"+@all", "only +client|list"};
+        for (int u = 0; u < 2; u++) {
+            char label[128];
+            int fo = proxy_connect(host, port);
+            proxy_cmd(fo, r, sizeof(r), 3, "AUTH", ok_users[u][0], ok_users[u][1]);
+            snprintf(label, sizeof(label), "admin check: AUTH user with %s", ok_labels[u]);
+            CHECK(strcmp(r, "+OK") == 0, label, pass, fail);
+            /* Pipelined, so the probe's reply can't get mixed into them. */
+            char want[128];
+            snprintf(want, sizeof(want), "user=%s ", ok_users[u][0]);
+            const char *pipe2 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$4\r\nECHO\r\n$2\r\nhi\r\n";
+            ssize_t wr = write(fo, pipe2, strlen(pipe2));
+            (void)wr;
+            int got = big2 ? resp_next_str(fo, big2, cap) != NULL : 0;
+            snprintf(label, sizeof(label), "admin check: CLIENT LIST allowed with %s", ok_labels[u]);
+            CHECK(got && strstr(big2, want), label, pass, fail);
+            got = resp_next_str(fo, r, sizeof(r)) != NULL;
+            snprintf(label, sizeof(label), "admin check: a pipelined ECHO after it, with %s", ok_labels[u]);
+            CHECK(got && strcmp(r, "hi") == 0, label, pass, fail);
+            n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "PROXY", "POOLS") : -1;
+            snprintf(label, sizeof(label), "admin check: PROXY POOLS allowed with %s", ok_labels[u]);
+            CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Pools"), label, pass, fail);
+            n = big2 ? resp_send_raw_reply(fo, big2, cap, 3, "PROXY", "INFO", "server") : -1;
+            snprintf(label, sizeof(label), "admin check: PROXY INFO allowed with %s", ok_labels[u]);
+            CHECK(n > 0 && big2[0] != '-' && strstr(big2, "# Server"), label, pass, fail);
+            close(fo);
+        }
+        free(big2);
+    } else {
+        SKIP("admin check for CLIENT LIST / PROXY POOLS / PROXY INFO");
+    }
 }
