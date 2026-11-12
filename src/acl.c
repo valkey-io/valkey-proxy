@@ -251,7 +251,8 @@ int acl_route_business_cmd(Worker *w, ClientConn *client, int node_idx) {
 
 /* ── ACL <subcommand> (top-level command, not to be confused with a
  * client's per-node authenticated business-command connection above) ──
- * All six subcommands are forwarded verbatim to a single node and the reply
+ * CAT is answered by the proxy itself (see acl_cat.c). The other six
+ * subcommands are forwarded verbatim to a single node and the reply
  * relayed as-is (same "any one node, relay reply as-is" idiom used elsewhere
  * for RANDOMKEY/INFO/COMMAND HELP/etc.), via this shared, default-identity
  * connection. HELP always uses it regardless of the client's own AUTH state
@@ -296,6 +297,10 @@ void handle_acl_cmd(Worker *w, ClientConn *client, int cmdlen) {
     subcmd[sclen] = '\0';
     for (int i = 0; subcmd[i]; i++) subcmd[i] = (char)toupper((unsigned char)subcmd[i]);
 
+    if (!strcmp(subcmd, "CAT")) {
+        handle_acl_cat(w, client); /* answered locally, see acl_cat.c */
+        return;
+    }
     if (!strcmp(subcmd, "HELP")) {
         client->waiting_acl_help = 1;
         acl_forward_to_one_node(w, client);
@@ -402,6 +407,9 @@ void handle_acl_help_readable(Worker *w, PoolConn *conn) {
 
     static const char *lines[] = {
         "ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "CAT [<category>]",
+        "    List all commands that belong to <category>, or all command categories",
+        "    when no category is specified.",
         "DRYRUN <username> <command> [<arg> ...]",
         "    Returns whether the user can execute the given command without executing the command.",
         "GETUSER <username>",

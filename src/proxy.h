@@ -825,6 +825,7 @@ void handle_acl_conn_readable(Worker *w, PoolConn *conn);
 int acl_route_business_cmd(Worker *w, ClientConn *client, int node_idx);
 void acl_teardown_all(Worker *w, ClientConn *client);
 void handle_acl_cmd(Worker *w, ClientConn *client, int cmdlen);
+void handle_acl_cat(Worker *w, ClientConn *client);
 void handle_acl_help_readable(Worker *w, PoolConn *conn);
 
 /* ── transactions (see src/txn.c) ─────────────────────────────────────── */

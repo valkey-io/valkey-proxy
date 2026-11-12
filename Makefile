@@ -11,7 +11,7 @@ endif
 
 POOL_TARGET = valkey-proxy
 POOL_SRCS   = src/valkey-proxy.c src/config.c src/cluster.c src/resp.c \
-              src/pool.c src/cmd.c src/fanout.c src/pubsub.c src/acl.c src/client.c \
+              src/pool.c src/cmd.c src/fanout.c src/pubsub.c src/acl.c src/acl_cat.c src/client.c \
               src/hello.c src/event_loop.c src/metrics.c src/info.c src/mux.c \
               src/client_list.c src/txn.c
 BUILD_DIR   = build
