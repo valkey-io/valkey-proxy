@@ -45,6 +45,7 @@ static void acl_reply_ok(Worker *w, ClientConn *client) {
 }
 
 static void acl_soft_fail(Worker *w, ClientConn *client, const char *msg) {
+    if (acl_admin_info_without_pools(w, client)) return;
     client_send_error(w, client, msg);
     client->admin_cmd = ADMIN_CMD_NONE;
     client->pbuf_len = 0;
@@ -567,16 +568,14 @@ static void admin_probe_done(Worker *w, PoolConn *conn, ClientConn *cl, int rlen
         handle_proxy_info_cmd(w, cl, cl->hbuf_len);
 }
 
-/* The probe's connection failed (e.g. the backend closed it while idle):
- * fail just this command, and let the next one open a new connection. */
-static void admin_probe_failed(Worker *w, PoolConn *conn, ClientConn *cl) {
-    if (cl->admin_cmd != ADMIN_CMD_INFO) {
-        client_recover_after_backend_error(w, cl, conn, "backend connection closed");
-        return;
-    }
-    pool_destroy_conn(w, conn);
-    admin_probe_end(w, NULL, cl);
-    info_reply(w, cl, cl->hbuf_len, 0);
+/* The probe got no answer (no connection, or the backend closed it): INFO
+ * goes on without its Pools section, and nothing is cached. Returns 0 for
+ * the other commands, which fail as usual. */
+int acl_admin_info_without_pools(Worker *w, ClientConn *client) {
+    if (client->admin_cmd != ADMIN_CMD_INFO) return 0;
+    admin_probe_end(w, NULL, client);
+    info_reply(w, client, client->hbuf_len, 0);
+    return 1;
 }
 
 /* handle_backend_readable()'s POOL_ACL special case. */
@@ -612,8 +611,11 @@ void handle_acl_conn_readable(Worker *w, PoolConn *conn) {
         ssize_t n = read(conn->fd, conn->rbuf + conn->rbuf_len, (size_t)(conn->rbuf_cap - conn->rbuf_len));
         if (n < 0 && errno == EAGAIN) return;
         if (n <= 0) {
-            if (cl->admin_cmd && !conn->acl_authenticating)
-                admin_probe_failed(w, conn, cl);
+            /* The probe's connection (e.g. closed by the backend while
+             * idle): fail just this command, and let the next one open a
+             * new connection. */
+            if (cl->admin_cmd)
+                client_recover_after_backend_error(w, cl, conn, "backend connection closed");
             else
                 close_client(w, cl);
             return;
