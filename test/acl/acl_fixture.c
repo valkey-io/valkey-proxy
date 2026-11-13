@@ -22,6 +22,9 @@
  *                         back -NOPERM, as CLIENT LIST would on Valkey.
  *   g_test_acl_cl_user -- nothing but CLIENT LIST (-@all +client|list): those
  *                         three are allowed, by Valkey's own per-command rule.
+ *   g_test_acl_kill_user -- like g_test_acl_user, for the test that kills its
+ *                         backend connections (test_acl_fixture_kill_user()),
+ *                         so no earlier test has its admin check cached.
  */
 
 const char *g_test_acl_user = NULL;
@@ -32,13 +35,16 @@ const char *g_test_acl_noadmin_user = NULL;
 const char *g_test_acl_noadmin_pass = NULL;
 const char *g_test_acl_cl_user = NULL;
 const char *g_test_acl_cl_pass = NULL;
+const char *g_test_acl_kill_user = NULL;
+const char *g_test_acl_kill_pass = NULL;
 
 #define FIXTURE_USER         "tc-proxy-acl"
 #define FIXTURE_RO_USER      "tc-proxy-acl-ro"
 #define FIXTURE_NOADMIN_USER "tc-proxy-acl-noadmin"
 #define FIXTURE_CL_USER      "tc-proxy-acl-cl"
+#define FIXTURE_KILL_USER    "tc-proxy-acl-kill"
 
-static char fixture_pass[64], fixture_ro_pass[64], fixture_noadmin_pass[64], fixture_cl_pass[64];
+static char fixture_pass[64], fixture_ro_pass[64], fixture_noadmin_pass[64], fixture_cl_pass[64], fixture_kill_pass[64];
 static char node_host[64][256];
 static int node_port[64];
 static int node_count = 0;
@@ -58,26 +64,29 @@ static int node_cmd_ok(const char *host, int port, int argc, const char **args) 
 }
 
 static void create_on_node(const char *host, int port, int *ok) {
-    char full_pw[80], ro_pw[80], noadmin_pw[80], cl_pw[80];
+    char full_pw[80], ro_pw[80], noadmin_pw[80], cl_pw[80], kill_pw[80];
     snprintf(full_pw, sizeof(full_pw), ">%s", fixture_pass);
     snprintf(ro_pw, sizeof(ro_pw), ">%s", fixture_ro_pass);
     snprintf(noadmin_pw, sizeof(noadmin_pw), ">%s", fixture_noadmin_pass);
     snprintf(cl_pw, sizeof(cl_pw), ">%s", fixture_cl_pass);
+    snprintf(kill_pw, sizeof(kill_pw), ">%s", fixture_kill_pass);
     const char *full[] = {"ACL", "SETUSER", FIXTURE_USER, "reset", "on", full_pw, "~*", "&*", "+@all"};
     const char *ro[] = {"ACL", "SETUSER", FIXTURE_RO_USER, "reset",        "on",
                         ro_pw, "~*",      "+@read",        "+@connection", "+acl|whoami"};
     const char *noadmin[] = {"ACL",   "SETUSER", FIXTURE_NOADMIN_USER, "reset", "on", noadmin_pw, "~*", "&*",
                              "+@all", "-@admin"};
     const char *cl[] = {"ACL", "SETUSER", FIXTURE_CL_USER, "reset", "on", cl_pw, "-@all", "+client|list"};
+    const char *kill[] = {"ACL", "SETUSER", FIXTURE_KILL_USER, "reset", "on", kill_pw, "~*", "&*", "+@all"};
     if (!node_cmd_ok(host, port, 9, full) || !node_cmd_ok(host, port, 10, ro) ||
-        !node_cmd_ok(host, port, 10, noadmin) || !node_cmd_ok(host, port, 8, cl))
+        !node_cmd_ok(host, port, 10, noadmin) || !node_cmd_ok(host, port, 8, cl) || !node_cmd_ok(host, port, 9, kill))
         *ok = 0;
 }
 
 void test_acl_fixture_teardown(void) {
     for (int i = 0; i < node_count; i++) {
-        const char *del[] = {"ACL", "DELUSER", FIXTURE_USER, FIXTURE_RO_USER, FIXTURE_NOADMIN_USER, FIXTURE_CL_USER};
-        if (!node_cmd_ok(node_host[i], node_port[i], 6, del))
+        const char *del[] = {"ACL",           "DELUSER",        FIXTURE_USER, FIXTURE_RO_USER, FIXTURE_NOADMIN_USER,
+                             FIXTURE_CL_USER, FIXTURE_KILL_USER};
+        if (!node_cmd_ok(node_host[i], node_port[i], 7, del))
             fprintf(stderr, "warning: could not delete test ACL users on %s:%d\n", node_host[i], node_port[i]);
     }
     node_count = 0;
@@ -85,6 +94,14 @@ void test_acl_fixture_teardown(void) {
     g_test_acl_ro_user = g_test_acl_ro_pass = NULL;
     g_test_acl_noadmin_user = g_test_acl_noadmin_pass = NULL;
     g_test_acl_cl_user = g_test_acl_cl_pass = NULL;
+    g_test_acl_kill_user = g_test_acl_kill_pass = NULL;
+}
+
+/* Closes every connection logged in as user on every cluster node, as a
+ * backend timeout or restart would. */
+void test_acl_fixture_kill_user(const char *user) {
+    const char *kill[] = {"CLIENT", "KILL", "USER", user};
+    for (int i = 0; i < node_count; i++) node_cmd_ok(node_host[i], node_port[i], 4, kill);
 }
 
 /* seed is "host:port". Returns 0 on success (globals set), -1 otherwise
@@ -131,6 +148,7 @@ int test_acl_fixture_setup(const char *seed) {
     snprintf(fixture_ro_pass, sizeof(fixture_ro_pass), "tc-ro-pw-%d", (int)getpid());
     snprintf(fixture_noadmin_pass, sizeof(fixture_noadmin_pass), "tc-noadmin-pw-%d", (int)getpid());
     snprintf(fixture_cl_pass, sizeof(fixture_cl_pass), "tc-cl-pw-%d", (int)getpid());
+    snprintf(fixture_kill_pass, sizeof(fixture_kill_pass), "tc-kill-pw-%d", (int)getpid());
     int ok = 1;
     for (int i = 0; i < node_count; i++) create_on_node(node_host[i], node_port[i], &ok);
     if (!ok) {
@@ -147,7 +165,9 @@ int test_acl_fixture_setup(const char *seed) {
     g_test_acl_noadmin_pass = fixture_noadmin_pass;
     g_test_acl_cl_user = FIXTURE_CL_USER;
     g_test_acl_cl_pass = fixture_cl_pass;
-    printf("Created test ACL users %s / %s / %s / %s on %d cluster node(s)\n", FIXTURE_USER, FIXTURE_RO_USER,
-           FIXTURE_NOADMIN_USER, FIXTURE_CL_USER, node_count);
+    g_test_acl_kill_user = FIXTURE_KILL_USER;
+    g_test_acl_kill_pass = fixture_kill_pass;
+    printf("Created test ACL users %s / %s / %s / %s / %s on %d cluster node(s)\n", FIXTURE_USER, FIXTURE_RO_USER,
+           FIXTURE_NOADMIN_USER, FIXTURE_CL_USER, FIXTURE_KILL_USER, node_count);
     return 0;
 }
