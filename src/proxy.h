@@ -346,11 +346,9 @@ struct ClientConn {
     PoolConn *acl_conns[MAX_NODES]; /* per-node pinned, authenticated conn;
                                             NULL = not yet connected to that node */
     int waiting_acl_help;           /* 1 = pending reply is an ACL HELP probe */
-    /* Admin check for CLIENT LIST / PROXY POOLS / PROXY INFO (see acl.c):
-     * admin_probe = the pending reply is the permission probe, sent from
-     * pbuf while the command itself waits in hbuf, run again once the probe
-     * allows it with admin_passed set so it isn't checked twice. */
-    int admin_probe, admin_passed;
+    /* Admin check (see acl.c): which ADMIN_CMD_* waits in hbuf while the
+     * pending reply is the permission probe sent from pbuf. */
+    int admin_cmd;
     /* ── RESP protocol version (see src/hello.c) ────────────────────────── */
     int resp; /* 2 or 3; set at accept() time, changed by HELLO */
 #ifdef USE_TLS
@@ -413,6 +411,9 @@ typedef struct {
     int slot_map[CLUSTER_SLOTS];
     int version;
 } TopoSnapshot;
+
+/* Commands behind the admin check (see acl.c). */
+enum { ADMIN_CMD_NONE, ADMIN_CMD_CLIENT_LIST, ADMIN_CMD_PROXY_POOLS, ADMIN_CMD_PROXY_INFO };
 
 /* A user's answer to the admin check (see acl.c): allowed, or the
  * -NOPERM reply to send, until until_us. */
@@ -814,6 +815,7 @@ void client_list_stop(Worker *w);
 
 /* ── proxy-local commands (see src/metrics.c) ───────────────────────── */
 void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen);
+void handle_proxy_pools(Worker *w, ClientConn *client);
 /* Appends the "# Pools" section that PROXY POOLS returns. 0 on success,
  * -1 on allocation failure. */
 int proxy_pools_append(Worker *w, GrowBuf *g);
@@ -846,7 +848,7 @@ void acl_teardown_all(Worker *w, ClientConn *client);
 void handle_acl_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_acl_cat(Worker *w, ClientConn *client);
 void handle_acl_help_readable(Worker *w, PoolConn *conn);
-int acl_admin_check(Worker *w, ClientConn *client);
+int acl_admin_check(Worker *w, ClientConn *client, int cmd);
 
 /* ── transactions (see src/txn.c) ─────────────────────────────────────── */
 /* Handles a command while the client is in MULTI, or one of MULTI / EXEC /
