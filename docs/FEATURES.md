@@ -129,7 +129,7 @@ reassigned after a failover, which `gen` makes visible.
 user, the proxy asks Valkey: it sends a `CLIENT LIST ID` that matches no client on the user's own
 connection. Any error refuses the command: it gets that error, and INFO leaves `pools` out. A
 `-NOPERM` names the command that was sent (`proxy|pools`, `proxy|info`), and is kept per user on
-each worker for 5 seconds, as is an answer that allows it. Other errors (e.g. `-LOADING`) aren't
+each worker for 5 seconds, as is an answer that allows it. Other errors (e.g. `-BUSY`) aren't
 kept. If Valkey can't be asked (the connection was closed, the ACL pool for that node is full, or
 logging in to it fails), the command gets an error such as `-ERR backend connection closed`, and
 INFO leaves `pools` out. Clients using the default identity aren't checked.
