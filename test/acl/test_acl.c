@@ -213,16 +213,26 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         proxy_cmd(fn, r, sizeof(r), 3, "AUTH", g_test_acl_noadmin_user, g_test_acl_noadmin_pass);
         CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH user without @admin", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 2, "PROXY", "POOLS");
-        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: PROXY POOLS without @admin is -NOPERM", pass, fail);
+        CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'proxy|pools'"),
+              "admin check: PROXY POOLS without @admin is -NOPERM naming proxy|pools", pass, fail);
         /* The probe's reply was used up: the user's connection is still in step. */
         proxy_cmd(fn, r, sizeof(r), 3, "SET", "tc:acl:admin", "v-admin");
         CHECK(strcmp(r, "+OK") == 0, "admin check: SET as the user after -NOPERM", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 2, "GET", "tc:acl:admin");
         CHECK(strcmp(r, "v-admin") == 0, "admin check: GET as the user after -NOPERM", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 3, "PROXY", "INFO", "server");
-        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: PROXY INFO without @admin is -NOPERM", pass, fail);
+        CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'proxy|info'"),
+              "admin check: PROXY INFO without @admin is -NOPERM naming proxy|info", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 2, "CLIENT", "LIST");
-        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: CLIENT LIST without @admin is -NOPERM", pass, fail);
+        CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'client|list'"),
+              "admin check: CLIENT LIST without @admin is -NOPERM", pass, fail);
+        /* INFO is allowed, but its Pools section is PROXY POOLS' data. */
+        int n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "INFO", "pools") : -1;
+        CHECK(n > 0 && big2[0] == '$' && !strstr(big2, "# Pools"),
+              "admin check: INFO pools without @admin leaves Pools out", pass, fail);
+        n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "INFO", "everything") : -1;
+        CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Server") && !strstr(big2, "# Pools"),
+              "admin check: INFO everything without @admin has the rest, not Pools", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 3, "PROXY", "POOLS", "extra");
         CHECK(strstr(r, "wrong number of arguments") != NULL, "admin check: PROXY POOLS arity error comes first", pass,
               fail);
@@ -230,7 +240,7 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         CHECK(strcmp(r, ":1") == 0, "admin check: DEL as the user", pass, fail);
         /* AUTH default goes back to the default identity, which isn't checked. */
         proxy_cmd(fn, r, sizeof(r), 3, "AUTH", "default", "x");
-        int n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "CLIENT", "LIST") : -1;
+        n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "CLIENT", "LIST") : -1;
         CHECK(n > 0 && big2[0] == '$' && strstr(big2, "user=default"), "admin check: default identity isn't checked",
               pass, fail);
         close(fn);
@@ -276,6 +286,9 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
             snprintf(label, sizeof(label), "admin check: PROXY %s allowed with %s", u == 0 ? "POOLS" : "INFO",
                      ok_labels[u]);
             CHECK(n > 0 && big2[0] != '-' && strstr(big2, u == 0 ? "# Pools" : "# Server"), label, pass, fail);
+            n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "INFO", "pools") : -1;
+            snprintf(label, sizeof(label), "admin check: INFO pools has Pools with %s", ok_labels[u]);
+            CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Pools"), label, pass, fail);
             close(fo);
         }
         free(big2);
