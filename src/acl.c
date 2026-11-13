@@ -14,8 +14,9 @@
  * "HELLO <ver> AUTH user pass" logs in the same way (see hello.c), but
  * atomically: its probe conn stays out of acl_conns[] until it succeeds,
  * so a failed HELLO AUTH keeps whatever identity the client already had. A
- * failed AUTH keeps it only when the login couldn't start (no free ACL
- * connection); once it is sent, a failure leaves the default identity.
+ * failed AUTH keeps it only when it fails before the login is sent (e.g. no
+ * free ACL connection); once it is sent, a failure leaves the default
+ * identity.
  *
  * AUTH default's success is never checked against the backend: there is no
  * "default identity" probe connection to validate it against, and the shared
@@ -46,7 +47,7 @@ static void acl_reply_ok(Worker *w, ClientConn *client) {
 }
 
 static void acl_soft_fail(Worker *w, ClientConn *client, const char *msg) {
-    if (acl_admin_info_without_pools(w, client)) return;
+    if (acl_admin_info_reply_without_pools(w, client)) return;
     client_send_error(w, client, msg);
     client->admin_cmd = ADMIN_CMD_NONE;
     client->pbuf_len = 0;
@@ -441,14 +442,14 @@ void handle_acl_help_readable(Worker *w, PoolConn *conn) {
 /* ── Admin check for CLIENT LIST, PROXY POOLS, PROXY INFO, INFO pools ──
  * The proxy answers these itself, so Valkey's ACL never sees them. For a
  * client logged in as a non-default user, ask Valkey instead: send a
- * CLIENT LIST that matches no client on the user's own connection. Valkey
- * checks permissions before it runs a command, so a reply means the user
- * may run CLIENT LIST, and an error means it may not: -NOPERM, or one that
- * came before the permission check (e.g. CLIENT renamed away). All of these
- * need that same permission; INFO just leaves its Pools section out. The
- * answer is kept per user on this worker for ADMIN_CACHE_TTL_US, so
- * polling doesn't probe every time. Default-identity clients aren't
- * checked. */
+ * CLIENT LIST that matches no client on the user's own connection. A reply
+ * means the user may run CLIENT LIST. Any error refuses the command, so it
+ * fails closed: -NOPERM, but also errors that say nothing about
+ * permissions (e.g. CLIENT renamed away, -BUSY). All of these need that
+ * same permission; INFO just leaves its Pools section out. A reply or a
+ * -NOPERM is kept per user on this worker for ADMIN_CACHE_TTL_US, so
+ * polling doesn't probe every time; other errors aren't. Default-identity
+ * clients aren't checked. */
 static const char ADMIN_PROBE[] = "*4\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$2\r\nID\r\n$19\r\n9223372036854775807\r\n";
 
 static AdminCheck *admin_cache_find(Worker *w, const ClientConn *client) {
@@ -483,9 +484,12 @@ static void admin_reject(Worker *w, ClientConn *client, int cmd, const char *err
     client_reject_cmd(w, client, err, len);
 }
 
-/* Whether client may run CLIENT LIST: 1 yes, 0 no, -1 not known yet (a
- * probe is on its way, and cmd, an ADMIN_CMD_*, runs again once it's back;
- * see admin_probe_done()). Sends no reply. */
+/* Whether client may run CLIENT LIST: 1 yes, 0 no, -1 not known yet. On
+ * 1 and 0 it sends no reply. On -1 the probe has gone to
+ * acl_route_business_cmd(), and cmd, an ADMIN_CMD_*, runs again once it's
+ * back (see admin_probe_done()). If the probe couldn't start, that has
+ * already replied (INFO without Pools, or an error) or closed the client:
+ * either way the caller must return without touching client. */
 int acl_admin_allowed(Worker *w, ClientConn *client, int cmd) {
     if (!client->acl_authenticated) return 1;
     AdminCheck *e = admin_cache_find(w, client);
@@ -512,7 +516,7 @@ int acl_admin_check(Worker *w, ClientConn *client, int cmd) {
     int ok = acl_admin_allowed(w, client, cmd);
     if (ok == 0) {
         AdminCheck *e = admin_cache_find(w, client);
-        if (e && !e->allowed)
+        if (e && !e->allowed && e->until_us > mono_us())
             admin_reject(w, client, cmd, e->err, e->errlen);
         else
             client_reject_error(w, client, "out of memory");
@@ -572,7 +576,7 @@ static void admin_probe_done(Worker *w, PoolConn *conn, ClientConn *cl, int rlen
 /* The probe got no answer (no connection, or the backend closed it): INFO
  * goes on without its Pools section, and nothing is cached. Returns 0 for
  * the other commands, which fail as usual. */
-int acl_admin_info_without_pools(Worker *w, ClientConn *client) {
+int acl_admin_info_reply_without_pools(Worker *w, ClientConn *client) {
     if (client->admin_cmd != ADMIN_CMD_INFO) return 0;
     admin_probe_end(w, NULL, client);
     info_reply(w, client, client->hbuf_len, 0);

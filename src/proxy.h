@@ -851,7 +851,7 @@ void handle_acl_cat(Worker *w, ClientConn *client);
 void handle_acl_help_readable(Worker *w, PoolConn *conn);
 int acl_admin_check(Worker *w, ClientConn *client, int cmd);
 int acl_admin_allowed(Worker *w, ClientConn *client, int cmd);
-int acl_admin_info_without_pools(Worker *w, ClientConn *client);
+int acl_admin_info_reply_without_pools(Worker *w, ClientConn *client);
 
 /* ── transactions (see src/txn.c) ─────────────────────────────────────── */
 /* Handles a command while the client is in MULTI, or one of MULTI / EXEC /
