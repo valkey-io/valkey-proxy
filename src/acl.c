@@ -13,8 +13,9 @@
  *
  * "HELLO <ver> AUTH user pass" logs in the same way (see hello.c), but
  * atomically: its probe conn stays out of acl_conns[] until it succeeds,
- * so a failed HELLO AUTH -- unlike a failed AUTH -- keeps whatever identity
- * the client already had.
+ * so a failed HELLO AUTH keeps whatever identity the client already had. A
+ * failed AUTH keeps it only when the login couldn't start (no free ACL
+ * connection); once it is sent, a failure leaves the default identity.
  *
  * AUTH default's success is never checked against the backend: there is no
  * "default identity" probe connection to validate it against, and the shared
