@@ -203,24 +203,31 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
     close(fa);
 
     /* ── CLIENT LIST / PROXY POOLS / PROXY INFO need the permission to run
-     * CLIENT LIST, which Valkey decides for a logged-in user. ──────────── */
+     * CLIENT LIST, which Valkey decides for a logged-in user. Each session
+     * starts with a different one, so each goes through the probe (later
+     * ones within 5s are answered from the per-user cache). ──────────── */
     if (g_test_acl_user) {
         const int cap = 1 << 20;
         char *big2 = malloc((size_t)cap);
         int fn = proxy_connect(host, port);
         proxy_cmd(fn, r, sizeof(r), 3, "AUTH", g_test_acl_noadmin_user, g_test_acl_noadmin_pass);
         CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH user without @admin", pass, fail);
-        proxy_cmd(fn, r, sizeof(r), 2, "CLIENT", "LIST");
-        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: CLIENT LIST without @admin is -NOPERM", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 2, "PROXY", "POOLS");
         CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: PROXY POOLS without @admin is -NOPERM", pass, fail);
+        /* The probe's reply was used up: the user's connection is still in step. */
+        proxy_cmd(fn, r, sizeof(r), 3, "SET", "tc:acl:admin", "v-admin");
+        CHECK(strcmp(r, "+OK") == 0, "admin check: SET as the user after -NOPERM", pass, fail);
+        proxy_cmd(fn, r, sizeof(r), 2, "GET", "tc:acl:admin");
+        CHECK(strcmp(r, "v-admin") == 0, "admin check: GET as the user after -NOPERM", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 3, "PROXY", "INFO", "server");
         CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: PROXY INFO without @admin is -NOPERM", pass, fail);
-        /* Answered from the cache this time; the connection still works. */
         proxy_cmd(fn, r, sizeof(r), 2, "CLIENT", "LIST");
-        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: a second CLIENT LIST is -NOPERM too", pass, fail);
-        proxy_cmd(fn, r, sizeof(r), 2, "ECHO", "still-here");
-        CHECK(strcmp(r, "still-here") == 0, "admin check: other commands still run after -NOPERM", pass, fail);
+        CHECK(strncmp(r, "-NOPERM", 7) == 0, "admin check: CLIENT LIST without @admin is -NOPERM", pass, fail);
+        proxy_cmd(fn, r, sizeof(r), 3, "PROXY", "POOLS", "extra");
+        CHECK(strstr(r, "wrong number of arguments") != NULL, "admin check: PROXY POOLS arity error comes first", pass,
+              fail);
+        proxy_cmd(fn, r, sizeof(r), 2, "DEL", "tc:acl:admin");
+        CHECK(strcmp(r, ":1") == 0, "admin check: DEL as the user", pass, fail);
         /* AUTH default goes back to the default identity, which isn't checked. */
         proxy_cmd(fn, r, sizeof(r), 3, "AUTH", "default", "x");
         int n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "CLIENT", "LIST") : -1;
@@ -236,7 +243,21 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
             proxy_cmd(fo, r, sizeof(r), 3, "AUTH", ok_users[u][0], ok_users[u][1]);
             snprintf(label, sizeof(label), "admin check: AUTH user with %s", ok_labels[u]);
             CHECK(strcmp(r, "+OK") == 0, label, pass, fail);
-            /* Pipelined, so the probe's reply can't get mixed into them. */
+            /* First command: PROXY INFO for one user, PROXY POOLS for the other. */
+            if (u == 0)
+                n = big2 ? resp_send_raw_reply(fo, big2, cap, 3, "PROXY", "INFO", "server") : -1;
+            else
+                n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "PROXY", "POOLS") : -1;
+            snprintf(label, sizeof(label), "admin check: PROXY %s allowed with %s", u == 0 ? "INFO" : "POOLS",
+                     ok_labels[u]);
+            CHECK(n > 0 && big2[0] != '-' && strstr(big2, u == 0 ? "# Server" : "# Pools"), label, pass, fail);
+            /* A backend command right after: the probe's reply didn't leak
+             * into it. The CLIENT LIST-only user gets Valkey's own -NOPERM. */
+            proxy_cmd(fo, r, sizeof(r), 2, "GET", "tc:acl:admin:none");
+            snprintf(label, sizeof(label), "admin check: GET in step after the probe, with %s", ok_labels[u]);
+            CHECK(u == 0 ? strcmp(r, "(nil)") == 0 : strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'get'") != NULL, label,
+                  pass, fail);
+            /* Pipelined, so a reply out of order would show. */
             char want[128];
             snprintf(want, sizeof(want), "user=%s ", ok_users[u][0]);
             const char *pipe2 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$4\r\nECHO\r\n$2\r\nhi\r\n";
@@ -248,12 +269,13 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
             got = resp_next_str(fo, r, sizeof(r)) != NULL;
             snprintf(label, sizeof(label), "admin check: a pipelined ECHO after it, with %s", ok_labels[u]);
             CHECK(got && strcmp(r, "hi") == 0, label, pass, fail);
-            n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "PROXY", "POOLS") : -1;
-            snprintf(label, sizeof(label), "admin check: PROXY POOLS allowed with %s", ok_labels[u]);
-            CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Pools"), label, pass, fail);
-            n = big2 ? resp_send_raw_reply(fo, big2, cap, 3, "PROXY", "INFO", "server") : -1;
-            snprintf(label, sizeof(label), "admin check: PROXY INFO allowed with %s", ok_labels[u]);
-            CHECK(n > 0 && big2[0] != '-' && strstr(big2, "# Server"), label, pass, fail);
+            if (u == 0)
+                n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "PROXY", "POOLS") : -1;
+            else
+                n = big2 ? resp_send_raw_reply(fo, big2, cap, 3, "PROXY", "INFO", "server") : -1;
+            snprintf(label, sizeof(label), "admin check: PROXY %s allowed with %s", u == 0 ? "POOLS" : "INFO",
+                     ok_labels[u]);
+            CHECK(n > 0 && big2[0] != '-' && strstr(big2, u == 0 ? "# Pools" : "# Server"), label, pass, fail);
             close(fo);
         }
         free(big2);
