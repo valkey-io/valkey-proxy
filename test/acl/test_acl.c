@@ -293,29 +293,30 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         }
 
         /* The backend closes the user's idle connection (timeout, restart):
-         * the probe finds it closed. That fails just the command, and INFO
-         * just leaves Pools out. The next one opens a new connection. */
+         * the probe finds it closed. INFO just leaves Pools out, other
+         * commands fail, and neither is cached, so the next probe opens a
+         * new connection. */
         int fk = proxy_connect(host, port);
         proxy_cmd(fk, r, sizeof(r), 3, "AUTH", g_test_acl_kill_user, g_test_acl_kill_pass);
         CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH user whose connection gets closed", pass, fail);
         test_acl_fixture_kill_user(g_test_acl_kill_user);
-        proxy_cmd(fk, r, sizeof(r), 2, "CLIENT", "LIST");
-        CHECK(strncmp(r, "-ERR backend connection", 23) == 0,
-              "admin check: CLIENT LIST on a closed connection fails just the command", pass, fail);
-        proxy_cmd(fk, r, sizeof(r), 1, "PING");
-        CHECK(strcmp(r, "+PONG") == 0, "admin check: client still there after the failed probe", pass, fail);
-        /* AUTH again for a new connection to close, as nothing was cached. */
-        proxy_cmd(fk, r, sizeof(r), 3, "AUTH", g_test_acl_kill_user, g_test_acl_kill_pass);
-        test_acl_fixture_kill_user(g_test_acl_kill_user);
         n = big2 ? resp_send_raw_reply(fk, big2, cap, 2, "INFO", "everything") : -1;
         CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Server") && !strstr(big2, "# Pools"),
               "admin check: INFO everything on a closed connection leaves Pools out", pass, fail);
-        n = big2 ? resp_send_raw_reply(fk, big2, cap, 2, "INFO", "pools") : -1;
-        CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Pools"),
-              "admin check: INFO pools has Pools again on a new connection", pass, fail);
+        proxy_cmd(fk, r, sizeof(r), 1, "PING");
+        CHECK(strcmp(r, "+PONG") == 0, "admin check: PING in step after INFO on a closed connection", pass, fail);
+        /* AUTH again for a new connection to close. */
+        proxy_cmd(fk, r, sizeof(r), 3, "AUTH", g_test_acl_kill_user, g_test_acl_kill_pass);
+        CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH again for a new connection", pass, fail);
+        test_acl_fixture_kill_user(g_test_acl_kill_user);
+        proxy_cmd(fk, r, sizeof(r), 2, "CLIENT", "LIST");
+        CHECK(strncmp(r, "-ERR backend connection", 23) == 0,
+              "admin check: CLIENT LIST on a closed connection fails just the command", pass, fail);
         n = big2 ? resp_send_raw_reply(fk, big2, cap, 2, "CLIENT", "LIST") : -1;
         CHECK(n > 0 && big2[0] == '$' && strstr(big2, "user=tc-proxy-acl-kill "),
-              "admin check: CLIENT LIST works on a new connection", pass, fail);
+              "admin check: the next CLIENT LIST probes on a new connection", pass, fail);
+        proxy_cmd(fk, r, sizeof(r), 2, "GET", "tc:acl:admin:none");
+        CHECK(strcmp(r, "(nil)") == 0, "admin check: GET in step after the new connection", pass, fail);
         close(fk);
         free(big2);
     } else {
