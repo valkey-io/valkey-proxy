@@ -23,7 +23,7 @@ The list below covers every supported command.
 | `CLIENT ID` | Answered by proxy |
 | `CLIENT INFO` | Answered by proxy |
 | `CLIENT KILL` | Planned |
-| `CLIENT LIST` | Answered by proxy: the proxy's own clients on every worker thread, one `CLIENT INFO` line each. Takes the filters `CLIENT HELP` lists; `USER` doesn't check that the user exists, and `TYPE primary`/`replica` match nothing. A subscribed client gets an error, also in RESP3, where Valkey answers. A client logged in as a non-default user needs permission to run `CLIENT LIST` on the backend, as on Valkey |
+| `CLIENT LIST` | Answered by proxy: the proxy's own clients on every worker thread, one `CLIENT INFO` line each. Takes the filters `CLIENT HELP` lists; `USER` doesn't check that the user exists, and `TYPE primary`/`replica` match nothing. A subscribed client gets an error, also in RESP3, where Valkey answers. A client logged in as a non-default user needs permission to run `CLIENT LIST` on the backend, as on Valkey (see FEATURES.md §3.4) |
 | `CLIENT SETNAME` | Stored on the proxy only, never sent to a backend |
 | `ECHO` | Answered by proxy |
 | `HELLO` | Answered by proxy, except the first HELLO 3 (RESP3 probe) and AUTH with a non-default user, which go to the backend. Reports mode standalone. |
@@ -345,7 +345,7 @@ The list below covers every supported command.
 | `DBSIZE` | Broadcast to every primary node |
 | `FLUSHALL` | Broadcast to every primary node |
 | `FLUSHDB` | Broadcast to every primary node |
-| `INFO` | Answered as one standalone server: proxy sections answered locally, keyspace summed across primaries, other backend sections listed per shard; see FEATURES.md §3.4 |
+| `INFO` | Answered as one standalone server: proxy sections answered locally, keyspace summed across primaries, other backend sections listed per shard; see FEATURES.md §3.4. `pools` needs the same permission as `CLIENT LIST`, and is left out without it |
 | `LOLWUT` | Forwarded to one primary node |
 | `MEMORY USAGE` | |
 | `MODULE LIST` | Forwarded to one primary node |
