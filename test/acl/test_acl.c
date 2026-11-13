@@ -303,8 +303,8 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         n = big2 ? resp_send_raw_reply(fk, big2, cap, 2, "INFO", "everything") : -1;
         CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Server") && !strstr(big2, "# Pools"),
               "admin check: INFO everything on a closed connection leaves Pools out", pass, fail);
-        proxy_cmd(fk, r, sizeof(r), 1, "PING");
-        CHECK(strcmp(r, "+PONG") == 0, "admin check: PING in step after INFO on a closed connection", pass, fail);
+        proxy_cmd(fk, r, sizeof(r), 2, "GET", "tc:acl:admin:none");
+        CHECK(strcmp(r, "(nil)") == 0, "admin check: GET in step after INFO on a closed connection", pass, fail);
         /* AUTH again for a new connection to close. */
         proxy_cmd(fk, r, sizeof(r), 3, "AUTH", g_test_acl_kill_user, g_test_acl_kill_pass);
         CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH again for a new connection", pass, fail);
@@ -312,11 +312,15 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         proxy_cmd(fk, r, sizeof(r), 2, "CLIENT", "LIST");
         CHECK(strncmp(r, "-ERR backend connection", 23) == 0,
               "admin check: CLIENT LIST on a closed connection fails just the command", pass, fail);
-        n = big2 ? resp_send_raw_reply(fk, big2, cap, 2, "CLIENT", "LIST") : -1;
-        CHECK(n > 0 && big2[0] == '$' && strstr(big2, "user=tc-proxy-acl-kill "),
+        /* Pipelined with a GET, so input buffered during the probe is read
+         * once it's done, and a reply out of order would show. */
+        const char *pipe3 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$3\r\nGET\r\n$17\r\ntc:acl:admin:none\r\n";
+        int okw = write(fk, pipe3, strlen(pipe3)) == (ssize_t)strlen(pipe3);
+        int got = okw && big2 && resp_next_str(fk, big2, cap) != NULL;
+        CHECK(got && strstr(big2, "user=tc-proxy-acl-kill "),
               "admin check: the next CLIENT LIST probes on a new connection", pass, fail);
-        proxy_cmd(fk, r, sizeof(r), 2, "GET", "tc:acl:admin:none");
-        CHECK(strcmp(r, "(nil)") == 0, "admin check: GET in step after the new connection", pass, fail);
+        got = okw && resp_next_str(fk, r, sizeof(r)) != NULL;
+        CHECK(got && strcmp(r, "(nil)") == 0, "admin check: a pipelined GET after that probe", pass, fail);
         close(fk);
         free(big2);
     } else {
