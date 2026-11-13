@@ -583,8 +583,7 @@ void worker_sync_topology(Worker *w) {
                              * connection keeps waiting_client while idle, and
                              * then has no request to fail. */
                             ClientConn *wc = c->waiting_client;
-                            if (p->type == POOL_ACL && c != wc->pending_conn && c != wc->hello_auth_conn &&
-                                !c->acl_authenticating)
+                            if (p->type == POOL_ACL && c != wc->pending_conn && !c->acl_authenticating)
                                 pool_destroy_conn(w, c);
                             else
                                 client_recover_after_backend_error(w, wc, c, "backend node unavailable");

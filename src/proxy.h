@@ -413,14 +413,14 @@ typedef struct {
 } TopoSnapshot;
 
 /* Commands behind the admin check (see acl.c). */
-enum { ADMIN_CMD_NONE, ADMIN_CMD_CLIENT_LIST, ADMIN_CMD_PROXY_POOLS, ADMIN_CMD_PROXY_INFO };
+enum { ADMIN_CMD_NONE, ADMIN_CMD_CLIENT_LIST, ADMIN_CMD_PROXY_POOLS, ADMIN_CMD_PROXY_INFO, ADMIN_CMD_INFO };
 
 /* A user's answer to the admin check (see acl.c): allowed, or the
  * -NOPERM reply to send, until until_us. */
 #define ADMIN_CACHE_SIZE   16
 #define ADMIN_CACHE_TTL_US (5 * 1000000ULL)
 typedef struct {
-    char user[64];
+    char user[sizeof(((ClientConn *)0)->acl_user)];
     int userlen;
     int allowed;
     char err[256];
@@ -836,6 +836,7 @@ void info_get_reported_versions(char *valkey_version, size_t vcap, char *redis_v
 const char *info_reported_role(void);
 int info_get_reported_modules(BackendModule *out, int cap);
 void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen);
+void info_reply(Worker *w, ClientConn *client, int cmdlen, int pools);
 char *info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
 void handle_proxy_info_cmd(Worker *w, ClientConn *client, int cmdlen);
 char *proxy_info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
@@ -849,6 +850,7 @@ void handle_acl_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_acl_cat(Worker *w, ClientConn *client);
 void handle_acl_help_readable(Worker *w, PoolConn *conn);
 int acl_admin_check(Worker *w, ClientConn *client, int cmd);
+int acl_admin_allowed(Worker *w, ClientConn *client, int cmd);
 
 /* ── transactions (see src/txn.c) ─────────────────────────────────────── */
 /* Handles a command while the client is in MULTI, or one of MULTI / EXEC /

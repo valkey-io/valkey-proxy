@@ -540,7 +540,8 @@ static char *build_info(Worker *w, ClientConn *client, uint32_t mask, FanoutCtx 
  * cut off: resp_extract_all_args() stops at max without saying so. */
 #define INFO_MAX_ARGS 64
 
-void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen) {
+/* pools: whether the Pools section may be shown, -1 = not checked yet. */
+void info_reply(Worker *w, ClientConn *client, int cmdlen, int pools) {
     const char *args[INFO_MAX_ARGS + 1];
     int lens[INFO_MAX_ARGS + 1];
     int n = resp_extract_all_args(client->hbuf, cmdlen, args, lens, INFO_MAX_ARGS + 1);
@@ -551,6 +552,14 @@ void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen) {
     }
     if (n < 0) n = 0;
     uint32_t mask = parse_sections(args, lens, n);
+    /* Pools is PROXY POOLS' data, so it needs the same permission (see
+     * acl.c). Without it, INFO leaves the section out, as INFO itself is
+     * allowed. */
+    if ((mask & (1u << SEC_POOLS)) && pools < 0) {
+        pools = acl_admin_allowed(w, client, ADMIN_CMD_INFO);
+        if (pools < 0) return; /* acl.c calls back once the backend answers */
+    }
+    if (!pools) mask &= ~(1u << SEC_POOLS);
 
     /* Ask the shards only for the sections that need them. */
     const char *bargs[SEC_COUNT];
@@ -591,6 +600,10 @@ void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen) {
     int ntargets = topo_all_masters(w, targets);
     fanout_to_nodes(w, client, ctx, built, built_len, targets, ntargets);
     free(built);
+}
+
+void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen) {
+    info_reply(w, client, cmdlen, -1);
 }
 
 char *info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len) {
