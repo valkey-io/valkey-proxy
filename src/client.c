@@ -246,9 +246,16 @@ void client_recover_after_backend_error(Worker *w, ClientConn *client, PoolConn 
         close_client(w, client);
         return;
     }
+    /* The admin check's probe for INFO: answer without Pools (see acl.c). */
+    if (client->admin_cmd == ADMIN_CMD_INFO) {
+        pool_destroy_conn(w, conn);
+        acl_admin_info_reply_without_pools(w, client);
+        return;
+    }
     /* A failed HELLO ... AUTH login probe just fails the whole HELLO. */
     if (conn == client->hello_auth_conn) hello_auth_conn_forget(client);
     client_send_error(w, client, msg);
+    client->admin_cmd = ADMIN_CMD_NONE;
     client->pending_conn = NULL;
     client->hbuf_len = 0;
     client->pbuf_len = 0;

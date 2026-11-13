@@ -2845,6 +2845,7 @@ void handle_client_cmd(Worker *w, ClientConn *client, int cmdlen) {
     /* CLIENT LIST [options] — the proxy's own clients on every worker, one
      * CLIENT INFO line each, answered locally (see client_list.c). */
     if (!strcmp(subcmd, "LIST")) {
+        if (!acl_admin_check(w, client, ADMIN_CMD_CLIENT_LIST)) return;
         handle_client_list(w, client);
         return;
     }

@@ -172,7 +172,7 @@ int proxy_pools_append(Worker *w, GrowBuf *g) {
     return rc;
 }
 
-static void handle_proxy_pools(Worker *w, ClientConn *client) {
+void handle_proxy_pools(Worker *w, ClientConn *client) {
     GrowBuf g = {0};
     if (proxy_pools_append(w, &g) < 0) {
         free(g.buf);
@@ -202,10 +202,12 @@ void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen) {
             client->hbuf_len = 0;
             return;
         }
+        if (!acl_admin_check(w, client, ADMIN_CMD_PROXY_POOLS)) return;
         handle_proxy_pools(w, client);
         return;
     }
     if (sublen == 4 && !strncasecmp(sub, "INFO", 4)) {
+        if (!acl_admin_check(w, client, ADMIN_CMD_PROXY_INFO)) return;
         handle_proxy_info_cmd(w, client, cmdlen);
         return;
     }

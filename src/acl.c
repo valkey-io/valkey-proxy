@@ -13,8 +13,10 @@
  *
  * "HELLO <ver> AUTH user pass" logs in the same way (see hello.c), but
  * atomically: its probe conn stays out of acl_conns[] until it succeeds,
- * so a failed HELLO AUTH -- unlike a failed AUTH -- keeps whatever identity
- * the client already had.
+ * so a failed HELLO AUTH keeps whatever identity the client already had. A
+ * failed AUTH keeps it only when it fails before the login is sent (e.g. no
+ * free ACL connection); once it is sent, a failure leaves the default
+ * identity.
  *
  * AUTH default's success is never checked against the backend: there is no
  * "default identity" probe connection to validate it against, and the shared
@@ -45,7 +47,9 @@ static void acl_reply_ok(Worker *w, ClientConn *client) {
 }
 
 static void acl_soft_fail(Worker *w, ClientConn *client, const char *msg) {
+    if (acl_admin_info_reply_without_pools(w, client)) return;
     client_send_error(w, client, msg);
+    client->admin_cmd = ADMIN_CMD_NONE;
     client->pbuf_len = 0;
     client->hbuf_len = 0;
     client->using_pbuf = 0;
@@ -129,6 +133,9 @@ void handle_auth_cmd(Worker *w, ClientConn *client) {
         return;
     }
 
+    /* Not this user until the backend says so: a login that fails on the
+     * way leaves the default identity, not a user nobody logged in as. */
+    client->acl_authenticated = 0;
     /* NUL-terminated: CLIENT INFO prints acl_user with %s (fanout.c). */
     memcpy(client->acl_user, user, (size_t)userlen);
     client->acl_user[userlen] = '\0';
@@ -188,6 +195,12 @@ int acl_route_business_cmd(Worker *w, ClientConn *client, int node_idx) {
     client->node_idx = node_idx;
 
     PoolConn *conn = client->acl_conns[node_idx];
+    /* Its node was replaced while it sat idle (see worker_sync_topology()):
+     * log in to the new one instead. */
+    if (conn && conn->discard_on_release) {
+        pool_destroy_conn(w, conn);
+        conn = NULL;
+    }
     if (conn) {
         conn->waiting_client = client;
         client->pending_conn = conn;
@@ -426,6 +439,150 @@ void handle_acl_help_readable(Worker *w, PoolConn *conn) {
     send_multibulk_reply(w, cl, lines, (int)(sizeof(lines) / sizeof(lines[0])));
 }
 
+/* ── Admin check for CLIENT LIST, PROXY POOLS, PROXY INFO, INFO pools ──
+ * The proxy answers these itself, so Valkey's ACL never sees them. For a
+ * client logged in as a non-default user, ask Valkey instead: send a
+ * CLIENT LIST that matches no client on the user's own connection. A reply
+ * means the user may run CLIENT LIST. Any error refuses the command, so it
+ * fails closed: -NOPERM, but also errors that say nothing about
+ * permissions (e.g. CLIENT renamed away, -BUSY). All of these need that
+ * same permission; INFO just leaves its Pools section out. A reply or a
+ * -NOPERM is kept per user on this worker for ADMIN_CACHE_TTL_US, so
+ * polling doesn't probe every time; other errors aren't. Default-identity
+ * clients aren't checked. */
+static const char ADMIN_PROBE[] = "*4\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$2\r\nID\r\n$19\r\n9223372036854775807\r\n";
+
+static AdminCheck *admin_cache_find(Worker *w, const ClientConn *client) {
+    for (int i = 0; i < ADMIN_CACHE_SIZE; i++) {
+        AdminCheck *e = &w->admin_cache[i];
+        if (e->until_us && e->userlen == client->acl_userlen && !memcmp(e->user, client->acl_user, (size_t)e->userlen))
+            return e;
+    }
+    return NULL;
+}
+
+/* Sends the probe's error, naming the command the client sent instead of
+ * client|list. */
+static void admin_reject(Worker *w, ClientConn *client, int cmd, const char *err, int len) {
+    static const char CL[] = "'client|list'";
+    const char *name = cmd == ADMIN_CMD_PROXY_POOLS  ? "'proxy|pools'"
+                       : cmd == ADMIN_CMD_PROXY_INFO ? "'proxy|info'"
+                                                     : NULL;
+    char out[512];
+    const char *at = NULL;
+    for (int i = 0; name && !at && i + (int)sizeof(CL) - 1 <= len; i++)
+        if (!memcmp(err + i, CL, sizeof(CL) - 1)) at = err + i;
+    int namelen = name ? (int)strlen(name) : 0;
+    if (at && len - (int)(sizeof(CL) - 1) + namelen <= (int)sizeof(out)) {
+        int pre = (int)(at - err), post = len - pre - (int)(sizeof(CL) - 1);
+        memcpy(out, err, (size_t)pre);
+        memcpy(out + pre, name, (size_t)namelen);
+        memcpy(out + pre + namelen, at + sizeof(CL) - 1, (size_t)post);
+        err = out;
+        len = pre + namelen + post;
+    }
+    client_reject_cmd(w, client, err, len);
+}
+
+/* Whether client may run CLIENT LIST: 1 yes, 0 no, -1 not known yet. On
+ * 1 and 0 it sends no reply. On -1 the probe has gone to
+ * acl_route_business_cmd(), and cmd, an ADMIN_CMD_*, runs again once it's
+ * back (see admin_probe_done()). If the probe couldn't start, that has
+ * already replied (INFO without Pools, or an error) or closed the client:
+ * either way the caller must return without touching client. */
+int acl_admin_allowed(Worker *w, ClientConn *client, int cmd) {
+    if (!client->acl_authenticated) return 1;
+    AdminCheck *e = admin_cache_find(w, client);
+    if (e && e->until_us > mono_us()) return e->allowed;
+    int len = (int)sizeof(ADMIN_PROBE) - 1;
+    if (client->pbuf_cap < len) {
+        /* Left to later multi-key commands too: don't make it tiny. */
+        char *tmp = realloc(client->pbuf, 4096);
+        if (!tmp) return 0;
+        client->pbuf = tmp;
+        client->pbuf_cap = 4096;
+    }
+    memcpy(client->pbuf, ADMIN_PROBE, (size_t)len);
+    client->pbuf_len = len;
+    client->using_pbuf = 1;
+    client->admin_cmd = cmd;
+    acl_route_business_cmd(w, client, topo_first_master(w));
+    return -1;
+}
+
+/* Returns 1 if the caller may answer now, 0 if the client has been refused
+ * or a probe is on its way (see acl_admin_allowed()). */
+int acl_admin_check(Worker *w, ClientConn *client, int cmd) {
+    int ok = acl_admin_allowed(w, client, cmd);
+    if (ok == 0) {
+        AdminCheck *e = admin_cache_find(w, client);
+        if (e && !e->allowed && e->until_us > mono_us())
+            admin_reject(w, client, cmd, e->err, e->errlen);
+        else
+            client_reject_error(w, client, "out of memory");
+    }
+    return ok == 1;
+}
+
+/* The probe is over: the client goes back to its waiting command. */
+static void admin_probe_end(Worker *w, PoolConn *conn, ClientConn *cl) {
+    cl->admin_cmd = ADMIN_CMD_NONE;
+    cl->pbuf_len = 0;
+    cl->using_pbuf = 0;
+    cl->pending_conn = NULL;
+    if (conn) {
+        conn->rbuf_len = 0;
+        fd_unwatch(w, conn->fd, EL_READABLE);
+    }
+    cl->state = CS_READING_HDR;
+    fd_watch(w, cl->fd, EL_READABLE);
+}
+
+/* handle_acl_conn_readable()'s branch for the admin check's probe reply. */
+static void admin_probe_done(Worker *w, PoolConn *conn, ClientConn *cl, int rlen) {
+    int cmd = cl->admin_cmd;
+    int allowed = conn->rbuf[0] != '-';
+    int noperm = rlen >= 7 && !memcmp(conn->rbuf, "-NOPERM", 7);
+
+    /* Other errors say nothing about permissions: don't remember them. */
+    if ((allowed || noperm) && rlen <= (int)sizeof(w->admin_cache[0].err)) {
+        AdminCheck *e = admin_cache_find(w, cl);
+        if (!e) {
+            e = &w->admin_cache[0];
+            for (int i = 1; i < ADMIN_CACHE_SIZE; i++)
+                if (w->admin_cache[i].until_us < e->until_us) e = &w->admin_cache[i];
+        }
+        memcpy(e->user, cl->acl_user, (size_t)cl->acl_userlen);
+        e->userlen = cl->acl_userlen;
+        e->allowed = allowed;
+        e->errlen = allowed ? 0 : rlen;
+        if (!allowed) memcpy(e->err, conn->rbuf, (size_t)rlen);
+        e->until_us = mono_us() + ADMIN_CACHE_TTL_US;
+    }
+
+    admin_probe_end(w, conn, cl);
+    if (cmd == ADMIN_CMD_INFO)
+        info_reply(w, cl, cl->hbuf_len, allowed);
+    else if (!allowed)
+        admin_reject(w, cl, cmd, conn->rbuf, rlen);
+    else if (cmd == ADMIN_CMD_CLIENT_LIST)
+        handle_client_list(w, cl);
+    else if (cmd == ADMIN_CMD_PROXY_POOLS)
+        handle_proxy_pools(w, cl);
+    else
+        handle_proxy_info_cmd(w, cl, cl->hbuf_len);
+}
+
+/* The probe got no answer (no connection, or the backend closed it): INFO
+ * goes on without its Pools section, and nothing is cached. Returns 0 for
+ * the other commands, which fail as usual. */
+int acl_admin_info_reply_without_pools(Worker *w, ClientConn *client) {
+    if (client->admin_cmd != ADMIN_CMD_INFO) return 0;
+    admin_probe_end(w, NULL, client);
+    info_reply(w, client, client->hbuf_len, 0);
+    return 1;
+}
+
 /* handle_backend_readable()'s POOL_ACL special case. */
 void handle_acl_conn_readable(Worker *w, PoolConn *conn) {
     ClientConn *cl = conn->waiting_client;
@@ -457,13 +614,15 @@ void handle_acl_conn_readable(Worker *w, PoolConn *conn) {
         }
 
         ssize_t n = read(conn->fd, conn->rbuf + conn->rbuf_len, (size_t)(conn->rbuf_cap - conn->rbuf_len));
-        if (n < 0) {
-            if (errno == EAGAIN) return;
-            close_client(w, cl);
-            return;
-        }
-        if (n == 0) {
-            close_client(w, cl);
+        if (n < 0 && errno == EAGAIN) return;
+        if (n <= 0) {
+            /* The probe's connection (e.g. closed by the backend while
+             * idle): fail just this command, and let the next one open a
+             * new connection. */
+            if (cl->admin_cmd)
+                client_recover_after_backend_error(w, cl, conn, "backend connection closed");
+            else
+                close_client(w, cl);
             return;
         }
         conn->rbuf_len += (int)n;
@@ -541,6 +700,11 @@ void handle_acl_conn_readable(Worker *w, PoolConn *conn) {
             cl->pending_conn = conn;
             resume_client_after_conn(w, cl, conn);
         }
+        return;
+    }
+
+    if (cl->admin_cmd) {
+        admin_probe_done(w, conn, cl, rlen);
         return;
     }
 

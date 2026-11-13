@@ -82,7 +82,7 @@ Each section comes from one of three sources:
 | `keyspace` | Every master, summed per db (`avg_ttl` weighted by `expires`), so it agrees with `DBSIZE` |
 | `memory` `persistence` `stats` `commandstats` `errorstats` `latencystats` | Every master, listed per shard without merging |
 | `proxy` | Proxy. Workers, topology version, shard count, unmapped slots, and how many shards answered this reply (`info_shards_queried`/`_ok`/`_failed`), and one `worker<i>:connected_clients=<n>,peak_connected_clients=<n>` line per worker (current clients and the most it has held since startup). The main thread accepts every client and hands it to the worker with the fewest, so these stay within one of each other unless clients disconnect unevenly |
-| `pools` | Proxy. Same as `PROXY POOLS` |
+| `pools` | Proxy. Same as `PROXY POOLS`, and needs the same permission (see below) |
 
 In a per-shard section each shard starts with `shard<idx>:addr=<ip>:<port>,node_id=<id>,status=ok|error`
 and its own lines follow prefixed with `shard<idx>_` (e.g. `shard0_used_memory:...`), so the reply
@@ -123,6 +123,16 @@ workers that have this pool), the gauges `open`, `in_use` and `waiting`, and the
 `wait_us_sum`, `wait_us_max`, `wait_abandoned`, `wait_failed`, `connects`, `connect_failures`,
 `reconnects` and `destroys`. Counters are never reset; they keep counting when a node index is
 reassigned after a failover, which `gen` makes visible.
+
+`CLIENT LIST`, `PROXY POOLS`, `PROXY INFO` and INFO's `pools` section need permission to run
+`CLIENT LIST`, which is in Valkey's `@admin` category. For a client logged in as a non-default
+user, the proxy asks Valkey: it sends a `CLIENT LIST ID` that matches no client on the user's own
+connection. Any error refuses the command: it gets that error, and INFO leaves `pools` out. A
+`-NOPERM` names the command that was sent (`proxy|pools`, `proxy|info`), and is kept per user on
+each worker for 5 seconds, as is an answer that allows it. Other errors (e.g. `-BUSY`) aren't
+kept. If Valkey can't be asked (the connection was closed, the ACL pool for that node is full, or
+logging in to it fails), the command gets an error such as `-ERR backend connection closed`, and
+INFO leaves `pools` out. Clients using the default identity aren't checked.
 
 ## 4. Blocking commands
 

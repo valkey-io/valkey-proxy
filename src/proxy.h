@@ -346,6 +346,9 @@ struct ClientConn {
     PoolConn *acl_conns[MAX_NODES]; /* per-node pinned, authenticated conn;
                                             NULL = not yet connected to that node */
     int waiting_acl_help;           /* 1 = pending reply is an ACL HELP probe */
+    /* Admin check (see acl.c): which ADMIN_CMD_* waits in hbuf while the
+     * pending reply is the permission probe sent from pbuf. */
+    int admin_cmd;
     /* ── RESP protocol version (see src/hello.c) ────────────────────────── */
     int resp; /* 2 or 3; set at accept() time, changed by HELLO */
 #ifdef USE_TLS
@@ -409,6 +412,22 @@ typedef struct {
     int version;
 } TopoSnapshot;
 
+/* Commands behind the admin check (see acl.c). */
+enum { ADMIN_CMD_NONE, ADMIN_CMD_CLIENT_LIST, ADMIN_CMD_PROXY_POOLS, ADMIN_CMD_PROXY_INFO, ADMIN_CMD_INFO };
+
+/* A user's answer to the admin check (see acl.c): allowed, or the
+ * -NOPERM reply to send, until until_us. */
+#define ADMIN_CACHE_SIZE   16
+#define ADMIN_CACHE_TTL_US (5 * 1000000ULL)
+typedef struct {
+    char user[sizeof(((ClientConn *)0)->acl_user)];
+    int userlen;
+    int allowed;
+    char err[256];
+    int errlen;
+    uint64_t until_us;
+} AdminCheck;
+
 /* ── worker ─────────────────────────────────────────────────────────── */
 typedef struct {
     int thread_id;
@@ -468,6 +487,7 @@ typedef struct {
     /* 0 until worker_thread() is watching handoff_r (1) or has given up
      * during setup (-1); the main thread hands this worker nothing until 1. */
     atomic_int handoff_ready;
+    AdminCheck admin_cache[ADMIN_CACHE_SIZE];
 } Worker;
 
 typedef struct {
@@ -795,6 +815,7 @@ void client_list_stop(Worker *w);
 
 /* ── proxy-local commands (see src/metrics.c) ───────────────────────── */
 void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen);
+void handle_proxy_pools(Worker *w, ClientConn *client);
 /* Appends the "# Pools" section that PROXY POOLS returns. 0 on success,
  * -1 on allocation failure. */
 int proxy_pools_append(Worker *w, GrowBuf *g);
@@ -815,6 +836,7 @@ void info_get_reported_versions(char *valkey_version, size_t vcap, char *redis_v
 const char *info_reported_role(void);
 int info_get_reported_modules(BackendModule *out, int cap);
 void handle_info_cmd(Worker *w, ClientConn *client, int cmdlen);
+void info_reply(Worker *w, ClientConn *client, int cmdlen, int pools);
 char *info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
 void handle_proxy_info_cmd(Worker *w, ClientConn *client, int cmdlen);
 char *proxy_info_aggregate(Worker *w, FanoutCtx *ctx, int *out_len);
@@ -827,6 +849,9 @@ void acl_teardown_all(Worker *w, ClientConn *client);
 void handle_acl_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_acl_cat(Worker *w, ClientConn *client);
 void handle_acl_help_readable(Worker *w, PoolConn *conn);
+int acl_admin_check(Worker *w, ClientConn *client, int cmd);
+int acl_admin_allowed(Worker *w, ClientConn *client, int cmd);
+int acl_admin_info_reply_without_pools(Worker *w, ClientConn *client);
 
 /* ── transactions (see src/txn.c) ─────────────────────────────────────── */
 /* Handles a command while the client is in MULTI, or one of MULTI / EXEC /
