@@ -215,7 +215,10 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         proxy_cmd(fn, r, sizeof(r), 2, "PROXY", "POOLS");
         CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'proxy|pools'"),
               "admin check: PROXY POOLS without @admin is -NOPERM naming proxy|pools", pass, fail);
-        /* The probe's reply was used up: the user's connection is still in step. */
+        /* The probe's reply was used up. ACL WHOAMI goes on the probe's own
+         * connection (the first master's), so a leftover reply would show. */
+        proxy_cmd(fn, r, sizeof(r), 2, "ACL", "WHOAMI");
+        CHECK(strcmp(r, g_test_acl_noadmin_user) == 0, "admin check: ACL WHOAMI in step after -NOPERM", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 3, "SET", "tc:acl:admin", "v-admin");
         CHECK(strcmp(r, "+OK") == 0, "admin check: SET as the user after -NOPERM", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 2, "GET", "tc:acl:admin");
@@ -261,24 +264,27 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
             snprintf(label, sizeof(label), "admin check: PROXY %s allowed with %s", u == 0 ? "INFO" : "POOLS",
                      ok_labels[u]);
             CHECK(n > 0 && big2[0] != '-' && strstr(big2, u == 0 ? "# Server" : "# Pools"), label, pass, fail);
-            /* A backend command right after: the probe's reply didn't leak
-             * into it. The CLIENT LIST-only user gets Valkey's own -NOPERM. */
-            proxy_cmd(fo, r, sizeof(r), 2, "GET", "tc:acl:admin:none");
-            snprintf(label, sizeof(label), "admin check: GET in step after the probe, with %s", ok_labels[u]);
-            CHECK(u == 0 ? strcmp(r, "(nil)") == 0 : strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'get'") != NULL, label,
-                  pass, fail);
+            /* ACL WHOAMI right after, on the probe's own connection: the
+             * probe's reply didn't leak into it. The CLIENT LIST-only user
+             * gets Valkey's own -NOPERM. */
+            proxy_cmd(fo, r, sizeof(r), 2, "ACL", "WHOAMI");
+            snprintf(label, sizeof(label), "admin check: ACL WHOAMI in step after the probe, with %s", ok_labels[u]);
+            CHECK(u == 0 ? strcmp(r, ok_users[u][0]) == 0
+                         : strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'acl|whoami'") != NULL,
+                  label, pass, fail);
             /* Pipelined, so a reply out of order would show. */
             char want[128];
             snprintf(want, sizeof(want), "user=%s ", ok_users[u][0]);
-            const char *pipe2 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$4\r\nECHO\r\n$2\r\nhi\r\n";
+            const char *pipe2 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$3\r\nACL\r\n$6\r\nWHOAMI\r\n";
             ssize_t wr = write(fo, pipe2, strlen(pipe2));
             (void)wr;
             int got = big2 ? resp_next_str(fo, big2, cap) != NULL : 0;
             snprintf(label, sizeof(label), "admin check: CLIENT LIST allowed with %s", ok_labels[u]);
             CHECK(got && strstr(big2, want), label, pass, fail);
             got = resp_next_str(fo, r, sizeof(r)) != NULL;
-            snprintf(label, sizeof(label), "admin check: a pipelined ECHO after it, with %s", ok_labels[u]);
-            CHECK(got && strcmp(r, "hi") == 0, label, pass, fail);
+            snprintf(label, sizeof(label), "admin check: a pipelined ACL WHOAMI after it, with %s", ok_labels[u]);
+            CHECK(got && (u == 0 ? strcmp(r, ok_users[u][0]) == 0 : strstr(r, "'acl|whoami'") != NULL), label, pass,
+                  fail);
             if (u == 0)
                 n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "PROXY", "POOLS") : -1;
             else
@@ -303,8 +309,10 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         n = big2 ? resp_send_raw_reply(fk, big2, cap, 2, "INFO", "everything") : -1;
         CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Server") && !strstr(big2, "# Pools"),
               "admin check: INFO everything on a closed connection leaves Pools out", pass, fail);
-        proxy_cmd(fk, r, sizeof(r), 2, "GET", "tc:acl:admin:none");
-        CHECK(strcmp(r, "(nil)") == 0, "admin check: GET in step after INFO on a closed connection", pass, fail);
+        /* ACL WHOAMI goes on the probe's connection: it opens a new one. */
+        proxy_cmd(fk, r, sizeof(r), 2, "ACL", "WHOAMI");
+        CHECK(strcmp(r, g_test_acl_kill_user) == 0, "admin check: ACL WHOAMI on a new connection after INFO", pass,
+              fail);
         /* AUTH again for a new connection to close. */
         proxy_cmd(fk, r, sizeof(r), 3, "AUTH", g_test_acl_kill_user, g_test_acl_kill_pass);
         CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH again for a new connection", pass, fail);
@@ -312,15 +320,17 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         proxy_cmd(fk, r, sizeof(r), 2, "CLIENT", "LIST");
         CHECK(strncmp(r, "-ERR backend connection", 23) == 0,
               "admin check: CLIENT LIST on a closed connection fails just the command", pass, fail);
-        /* Pipelined with a GET, so input buffered during the probe is read
-         * once it's done, and a reply out of order would show. */
-        const char *pipe3 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$3\r\nGET\r\n$17\r\ntc:acl:admin:none\r\n";
+        /* Pipelined with an ACL WHOAMI on the same connection, so input
+         * buffered during the probe is read once it's done, and a reply out
+         * of order would show. */
+        const char *pipe3 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$3\r\nACL\r\n$6\r\nWHOAMI\r\n";
         int okw = write(fk, pipe3, strlen(pipe3)) == (ssize_t)strlen(pipe3);
         int got = okw && big2 && resp_next_str(fk, big2, cap) != NULL;
         CHECK(got && strstr(big2, "user=tc-proxy-acl-kill "),
               "admin check: the next CLIENT LIST probes on a new connection", pass, fail);
         got = okw && resp_next_str(fk, r, sizeof(r)) != NULL;
-        CHECK(got && strcmp(r, "(nil)") == 0, "admin check: a pipelined GET after that probe", pass, fail);
+        CHECK(got && strcmp(r, g_test_acl_kill_user) == 0, "admin check: a pipelined ACL WHOAMI after that probe", pass,
+              fail);
         close(fk);
         free(big2);
     } else {
