@@ -115,9 +115,6 @@ void handle_auth_cmd(Worker *w, ClientConn *client) {
     }
 
     if (client->acl_authenticated) acl_teardown_all(w, client);
-    /* Not this user until the backend says so: a login that fails on the
-     * way leaves the default identity, not a user nobody logged in as. */
-    client->acl_authenticated = 0;
 
     int ni = topo_first_master(w);
 
@@ -134,6 +131,9 @@ void handle_auth_cmd(Worker *w, ClientConn *client) {
         return;
     }
 
+    /* Not this user until the backend says so: a login that fails on the
+     * way leaves the default identity, not a user nobody logged in as. */
+    client->acl_authenticated = 0;
     /* NUL-terminated: CLIENT INFO prints acl_user with %s (fanout.c). */
     memcpy(client->acl_user, user, (size_t)userlen);
     client->acl_user[userlen] = '\0';
