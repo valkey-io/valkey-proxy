@@ -1,7 +1,7 @@
 #include "proxy.h"
 
 /* ── client helpers ─────────────────────────────────────────────────── */
-void client_send_error(Worker *w, ClientConn *client, const char *msg) {
+void hkhkhkhk(Worker *w, ClientConn *client, const char *msg) {
     char buf[256];
     int n = snprintf(buf, sizeof(buf), "-ERR %s\r\n", msg);
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
