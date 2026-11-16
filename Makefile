@@ -1,6 +1,8 @@
 POOL_CC      = gcc
 POOL_CFLAGS  = -O2 -Wall -Wextra -Isrc -pthread
 POOL_LDFLAGS = -pthread
+# Extra compiler flags, e.g. make EXTRA_CFLAGS=-Werror (used by CI)
+POOL_CFLAGS += $(EXTRA_CFLAGS)
 
 # TLS support for client connections (disable with: make valkey-proxy NO_TLS=1)
 ifeq ($(NO_TLS),)

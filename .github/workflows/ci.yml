@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# A new commit on a PR cancels the run still going for its previous commit.
+# Pushes to main get one group per commit, so they are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}${{ matrix.no_tls && ', NO_TLS' || '' }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-latest
+            no_tls: true
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Build proxy
+        run: make -j4 EXTRA_CFLAGS=-Werror ${{ matrix.no_tls && 'NO_TLS=1' || '' }}
+      - name: Build test runner
+        run: make -j4 test
+      - name: Configuration tests (no cluster needed)
+        run: make test-config
+
+  test:
+    name: integration tests (valkey ${{ matrix.valkey }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # valkey-bundle ships valkey-server/valkey-cli together with the
+        # bloom, json and search modules that the module suites need.
+        # 9.0 lacks commands the suites expect (e.g. HGETDEL) and hangs them.
+        # Move 9.2-rc2 to 9.2 once that bundle tag is published.
+        valkey: ['9.1', '9.2-rc2']
+    container:
+      image: valkey/valkey-bundle:${{ matrix.valkey }}
+    steps:
+      - name: Install build dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev make libssl-dev
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Build proxy and test runner
+        run: make -j4 valkey-proxy run-test
+      - name: Start Valkey cluster (3 masters + 3 replicas)
+        run: tools/ci/integration.sh cluster
+      - name: Start proxies
+        run: tools/ci/integration.sh proxies
+      - name: Run integration tests
+        run: tools/ci/integration.sh test
+      - name: Stop
+        if: always()
+        run: tools/ci/integration.sh stop
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: integration-logs-valkey-${{ matrix.valkey }}
+          path: |
+            build/ci/*.log
+            build/ci/*.conf
+            build/ci/node-*/valkey.log
+            build/ci/node-*/*.conf
+          retention-days: 7
