@@ -1,11 +1,6 @@
 # Architecture
 
-valkey-proxy sits between your clients and a Valkey Cluster. To a client, the whole cluster looks
-like one ordinary Valkey server: it connects to the proxy, sends commands, and never has to know
-which node holds which key.
 
-This document explains how the code under `src/` is organized and what happens to a command from the
-moment it arrives until its reply goes back. For the list of supported commands, see
 [FEATURES.md](FEATURES.md) and [COMMANDS.md](COMMANDS.md).
 
 ## The big picture
