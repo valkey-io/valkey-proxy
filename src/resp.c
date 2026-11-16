@@ -75,17 +75,17 @@ int resp_response_len(const char *buf, int len) {
         case ',':
         case '_':
         case '(': {
-            void *nl = memchr(buf, '\n', len);
-            return nl ? (int)((char *)nl - buf) + 1 : 0;
+            const char *nl = memchr(buf, '\n', len);
+            return nl ? (int)(nl - buf) + 1 : 0;
         }
         /* Bulk string (RESP2) and verbatim string (RESP3): identical framing,
      * a byte-count header line followed by that many bytes + CRLF. */
         case '$':
         case '=': {
-            void *nl = memchr(buf + 1, '\n', len - 1);
+            const char *nl = memchr(buf + 1, '\n', len - 1);
             if (!nl) return 0;
             int bl = atoi(buf + 1);
-            int hdr = (int)((char *)nl - buf) + 1;
+            int hdr = (int)(nl - buf) + 1;
             if (bl < 0) return hdr;
             return (len >= hdr + bl + 2) ? hdr + bl + 2 : 0;
         }
@@ -96,10 +96,10 @@ int resp_response_len(const char *buf, int len) {
         case '~':
         case '>':
         case '%': {
-            void *nl = memchr(buf + 1, '\n', len - 1);
+            const char *nl = memchr(buf + 1, '\n', len - 1);
             if (!nl) return 0;
             int cnt = atoi(buf + 1);
-            int off = (int)((char *)nl - buf) + 1;
+            int off = (int)(nl - buf) + 1;
             if (cnt < 0) return off;
             if (buf[0] == '%') cnt *= 2;
             for (int i = 0; i < cnt; i++) {
@@ -179,40 +179,40 @@ static int resp3_downgrade_elem(const char *buf, int len, int nil_array_depth, i
         case '+':
         case '-':
         case ':': {
-            void *nl = memchr(buf, '\n', len);
+            const char *nl = memchr(buf, '\n', len);
             if (!nl) return -1;
-            int elen = (int)((char *)nl - buf) + 1;
+            int elen = (int)(nl - buf) + 1;
             return gb_append(g, buf, elen) < 0 ? -1 : elen;
         }
         case '$': {
-            void *nl = memchr(buf + 1, '\n', len - 1);
+            const char *nl = memchr(buf + 1, '\n', len - 1);
             if (!nl) return -1;
-            int hdr = (int)((char *)nl - buf) + 1;
+            int hdr = (int)(nl - buf) + 1;
             int bl = atoi(buf + 1);
             int elen = (bl < 0) ? hdr : hdr + bl + 2;
             if (elen > len) return -1;
             return gb_append(g, buf, elen) < 0 ? -1 : elen;
         }
         case '_': {
-            void *nl = memchr(buf, '\n', len);
+            const char *nl = memchr(buf, '\n', len);
             if (!nl) return -1;
-            int elen = (int)((char *)nl - buf) + 1;
+            int elen = (int)(nl - buf) + 1;
             const char *nilrepr = (depth == nil_array_depth) ? "*-1\r\n" : "$-1\r\n";
             return gb_append(g, nilrepr, 5) < 0 ? -1 : elen;
         }
         case '#': {
-            void *nl = memchr(buf, '\n', len);
+            const char *nl = memchr(buf, '\n', len);
             if (!nl) return -1;
-            int elen = (int)((char *)nl - buf) + 1;
+            int elen = (int)(nl - buf) + 1;
             if (elen < 4) return -1;
             int val = (buf[1] == 't');
             return gb_append_fmt(g, ":%d\r\n", val) < 0 ? -1 : elen;
         }
         case ',':
         case '(': {
-            void *nl = memchr(buf, '\n', len);
+            const char *nl = memchr(buf, '\n', len);
             if (!nl) return -1;
-            int elen = (int)((char *)nl - buf) + 1;
+            int elen = (int)(nl - buf) + 1;
             int textlen = elen - 1 - 2; /* minus the type marker, minus the CRLF */
             if (textlen < 0) return -1;
             if (gb_append_fmt(g, "$%d\r\n", textlen) < 0) return -1;
@@ -220,9 +220,9 @@ static int resp3_downgrade_elem(const char *buf, int len, int nil_array_depth, i
             return gb_append(g, "\r\n", 2) < 0 ? -1 : elen;
         }
         case '=': {
-            void *nl = memchr(buf + 1, '\n', len - 1);
+            const char *nl = memchr(buf + 1, '\n', len - 1);
             if (!nl) return -1;
-            int hdr = (int)((char *)nl - buf) + 1;
+            int hdr = (int)(nl - buf) + 1;
             int bl = atoi(buf + 1);
             if (bl < 4) return -1; /* must at least carry the "txt:"/"mkd:" prefix */
             int elen = hdr + bl + 2;
@@ -236,9 +236,9 @@ static int resp3_downgrade_elem(const char *buf, int len, int nil_array_depth, i
         case '~':
         case '>':
         case '%': {
-            void *nl = memchr(buf + 1, '\n', len - 1);
+            const char *nl = memchr(buf + 1, '\n', len - 1);
             if (!nl) return -1;
-            int hdr = (int)((char *)nl - buf) + 1;
+            int hdr = (int)(nl - buf) + 1;
             int cnt = atoi(buf + 1);
             if (cnt < 0) return gb_append(g, "*-1\r\n", 5) < 0 ? -1 : hdr;
             int nelem = (buf[0] == '%') ? cnt * 2 : cnt;
@@ -298,9 +298,9 @@ int resp3_downgrade_push(const char *buf, int len, char **out, int *out_len) {
  * treat this as a hard error). */
 int resp3_flatten_pairs(const char *buf, int len, char **out, int *out_len) {
     if (len < 4 || buf[0] != '*') return 1;
-    void *nl = memchr(buf + 1, '\n', len - 1);
+    const char *nl = memchr(buf + 1, '\n', len - 1);
     if (!nl) return 1;
-    int hdr = (int)((char *)nl - buf) + 1;
+    int hdr = (int)(nl - buf) + 1;
     int n = atoi(buf + 1);
     if (n <= 0) return 1;
 
@@ -309,10 +309,10 @@ int resp3_flatten_pairs(const char *buf, int len, char **out, int *out_len) {
     int off = hdr;
     for (int i = 0; i < n; i++) {
         if (off >= len || buf[off] != '*') return 1;
-        void *nl2 = memchr(buf + off + 1, '\n', len - off - 1);
+        const char *nl2 = memchr(buf + off + 1, '\n', len - off - 1);
         if (!nl2) return -1;
         if (atoi(buf + off + 1) != 2) return 1;
-        int hdr2 = (int)((char *)nl2 - buf) + 1;
+        int hdr2 = (int)(nl2 - buf) + 1;
         int e1 = resp_response_len(buf + hdr2, len - hdr2);
         if (e1 <= 0) return -1;
         int e2 = resp_response_len(buf + hdr2 + e1, len - hdr2 - e1);
@@ -330,8 +330,8 @@ int resp3_flatten_pairs(const char *buf, int len, char **out, int *out_len) {
     }
     off = hdr;
     for (int i = 0; i < n; i++) {
-        void *nl2 = memchr(buf + off + 1, '\n', len - off - 1);
-        int hdr2 = (int)((char *)nl2 - buf) + 1;
+        const char *nl2 = memchr(buf + off + 1, '\n', len - off - 1);
+        int hdr2 = (int)(nl2 - buf) + 1;
         int e1 = resp_response_len(buf + hdr2, len - hdr2);
         int e2 = resp_response_len(buf + hdr2 + e1, len - hdr2 - e1);
         if (gb_append(&g, buf + hdr2, e1 + e2) < 0) {
@@ -357,9 +357,9 @@ int resp3_flatten_pairs(const char *buf, int len, char **out, int *out_len) {
  * convention identical to resp3_flatten_pairs(). */
 int resp3_nest_pairs(const char *buf, int len, char **out, int *out_len) {
     if (len < 4 || buf[0] != '*') return 1;
-    void *nl = memchr(buf + 1, '\n', len - 1);
+    const char *nl = memchr(buf + 1, '\n', len - 1);
     if (!nl) return 1;
-    int hdr = (int)((char *)nl - buf) + 1;
+    int hdr = (int)(nl - buf) + 1;
     int n = atoi(buf + 1);
     if (n <= 0 || (n % 2) != 0) return 1;
 
