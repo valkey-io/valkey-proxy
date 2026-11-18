@@ -530,6 +530,59 @@ void run_json_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd, r, sizeof(r), 7, "JSON.MSET", "{src}:doc", "$", "1", "{dst}:doc", "$", "2");
     CHECK(strcmp(r, "+OK") == 0, "JSON.MSET cross-slot: fan-out returns +OK", pass, fail);
 
+    /* ── JSON.MERGE (valkey-json >= 1.1) ─────────────────────────────────── */
+
+    /* missing key + root path: creates the key */
+    proxy_cmd(fd, r, sizeof(r), 4, "JSON.MERGE", "tc:json:merge", ".", "{\"a\":1,\"b\":2}");
+    if (strstr(r, "unknown command") != NULL) {
+        printf("  [SKIP] JSON.MERGE (backend valkey-json < 1.1)\n");
+    } else {
+        CHECK(strcmp(r, "+OK") == 0, "JSON.MERGE root on new key: returns +OK", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "JSON.GET", "tc:json:merge");
+        CHECK(strcmp(r, "{\"a\":1,\"b\":2}") == 0, "JSON.MERGE root on new key: creates document", pass, fail);
+
+        /* existing members replaced, new members added */
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.MERGE", "tc:json:merge", ".", "{\"b\":3,\"c\":4}");
+        CHECK(strcmp(r, "+OK") == 0, "JSON.MERGE root: returns +OK", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "JSON.GET", "tc:json:merge");
+        CHECK(strcmp(r, "{\"a\":1,\"b\":3,\"c\":4}") == 0, "JSON.MERGE root: replaces b, adds c", pass, fail);
+
+        /* null deletes a member */
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.MERGE", "tc:json:merge", ".", "{\"b\":null}");
+        CHECK(strcmp(r, "+OK") == 0, "JSON.MERGE null: returns +OK", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "JSON.GET", "tc:json:merge");
+        CHECK(strcmp(r, "{\"a\":1,\"c\":4}") == 0, "JSON.MERGE null: deletes member b", pass, fail);
+
+        /* merge into a sub-path */
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.SET", "tc:json:merge2", ".", "{\"a\":{\"x\":1,\"y\":2},\"b\":10}");
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.MERGE", "tc:json:merge2", ".a", "{\"y\":3,\"z\":4}");
+        CHECK(strcmp(r, "+OK") == 0, "JSON.MERGE sub-path: returns +OK", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "JSON.GET", "tc:json:merge2", ".a");
+        CHECK(strcmp(r, "{\"x\":1,\"y\":3,\"z\":4}") == 0, "JSON.MERGE sub-path: merges into .a", pass, fail);
+
+        /* arrays are replaced, objects merged recursively */
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.SET", "tc:json:merge3", ".", "{\"arr\":[1,2,3],\"obj\":{\"x\":1}}");
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.MERGE", "tc:json:merge3", ".", "{\"arr\":[4,5],\"obj\":{\"y\":2}}");
+        CHECK(strcmp(r, "+OK") == 0, "JSON.MERGE mixed types: returns +OK", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "JSON.GET", "tc:json:merge3");
+        CHECK(strcmp(r, "{\"arr\":[4,5],\"obj\":{\"x\":1,\"y\":2}}") == 0,
+              "JSON.MERGE mixed types: array replaced, object merged", pass, fail);
+
+        /* JSONPath matching several values */
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.SET", "tc:json:merge4", ".",
+                  "{\"users\":[{\"name\":\"Alice\",\"meta\":{\"active\":false}},"
+                  "{\"name\":\"Bob\",\"meta\":{\"active\":false}}]}");
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.MERGE", "tc:json:merge4", "$..meta", "{\"active\":true}");
+        CHECK(strcmp(r, "+OK") == 0, "JSON.MERGE $..meta: returns +OK", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "JSON.GET", "tc:json:merge4", ".users[1].meta");
+        CHECK(strstr(r, "\"active\":true") != NULL, "JSON.MERGE $..meta: updates every match", pass, fail);
+
+        /* missing key + non-root path: backend error relayed by the proxy */
+        proxy_cmd(fd, r, sizeof(r), 4, "JSON.MERGE", "tc:json:merge_missing", ".a", "{\"x\":1}");
+        CHECK(r[0] == '-' && strstr(r, "unsupport command") == NULL,
+              "JSON.MERGE missing key, non-root path: backend error relayed", pass, fail);
+    }
+
     proxy_cmd(fd, r, sizeof(r), 1, "FLUSHDB");
     close(fd);
 }

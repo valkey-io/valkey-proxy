@@ -402,6 +402,7 @@ These commands require the JSON module (valkey-json) to be loaded on every backe
 | `JSON.STRLEN` | |
 | `JSON.TOGGLE` | |
 | `JSON.TYPE` | |
+| `JSON.MERGE` | |
 
 ### Search
 
