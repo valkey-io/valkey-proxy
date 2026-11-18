@@ -18,10 +18,9 @@
  *                         back -NOPERM) instead of on the shared,
  *                         default-identity pools.
  *   g_test_acl_noadmin_user -- everything but @admin (~* &* +@all -@admin):
- *                         CLIENT LIST / PROXY POOLS / PROXY INFO must come
- *                         back -NOPERM, as CLIENT LIST would on Valkey.
- *   g_test_acl_cl_user -- nothing but CLIENT LIST (-@all +client|list): those
- *                         three are allowed, by Valkey's own per-command rule.
+ *                         CLIENT LIST must come back -NOPERM, as on Valkey.
+ *   g_test_acl_cl_user -- nothing but CLIENT LIST (-@all +client|list): it is
+ *                         allowed, by Valkey's own per-command rule.
  *   g_test_acl_kill_user -- like g_test_acl_user, for the test that kills its
  *                         backend connections (test_acl_fixture_kill_user()),
  *                         so no earlier test has its admin check cached.

@@ -202,19 +202,18 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
     }
     close(fa);
 
-    /* ── CLIENT LIST / PROXY POOLS / PROXY INFO need the permission to run
-     * CLIENT LIST, which Valkey decides for a logged-in user. Each session
-     * starts with a different one, so each goes through the probe (later
-     * ones within 5s are answered from the per-user cache). ──────────── */
+    /* ── CLIENT LIST needs its own permission, which Valkey decides for a
+     * logged-in user, as on Valkey. PROXY POOLS, PROXY INFO and INFO aren't
+     * @admin, so they aren't checked. ──────────────────────────────────── */
     if (g_test_acl_user) {
         const int cap = 1 << 20;
         char *big2 = malloc((size_t)cap);
         int fn = proxy_connect(host, port);
         proxy_cmd(fn, r, sizeof(r), 3, "AUTH", g_test_acl_noadmin_user, g_test_acl_noadmin_pass);
         CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH user without @admin", pass, fail);
-        proxy_cmd(fn, r, sizeof(r), 2, "PROXY", "POOLS");
-        CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'proxy|pools'"),
-              "admin check: PROXY POOLS without @admin is -NOPERM naming proxy|pools", pass, fail);
+        proxy_cmd(fn, r, sizeof(r), 2, "CLIENT", "LIST");
+        CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'client|list'"),
+              "admin check: CLIENT LIST without @admin is -NOPERM", pass, fail);
         /* The probe's reply was used up. ACL WHOAMI goes on the probe's own
          * connection (the first master's), so a leftover reply would show. */
         proxy_cmd(fn, r, sizeof(r), 2, "ACL", "WHOAMI");
@@ -223,22 +222,16 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         CHECK(strcmp(r, "+OK") == 0, "admin check: SET as the user after -NOPERM", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 2, "GET", "tc:acl:admin");
         CHECK(strcmp(r, "v-admin") == 0, "admin check: GET as the user after -NOPERM", pass, fail);
-        proxy_cmd(fn, r, sizeof(r), 3, "PROXY", "INFO", "server");
-        CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'proxy|info'"),
-              "admin check: PROXY INFO without @admin is -NOPERM naming proxy|info", pass, fail);
+        /* From the cache this time. */
         proxy_cmd(fn, r, sizeof(r), 2, "CLIENT", "LIST");
         CHECK(strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'client|list'"),
-              "admin check: CLIENT LIST without @admin is -NOPERM", pass, fail);
-        /* INFO is allowed, but its Pools section is PROXY POOLS' data. */
-        int n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "INFO", "pools") : -1;
-        CHECK(n > 0 && big2[0] == '$' && !strstr(big2, "# Pools"),
-              "admin check: INFO pools without @admin leaves Pools out", pass, fail);
-        n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "INFO", "everything") : -1;
-        CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Server") && !strstr(big2, "# Pools"),
-              "admin check: INFO everything without @admin has the rest, not Pools", pass, fail);
-        proxy_cmd(fn, r, sizeof(r), 3, "PROXY", "POOLS", "extra");
-        CHECK(strstr(r, "wrong number of arguments") != NULL, "admin check: PROXY POOLS arity error comes first", pass,
-              fail);
+              "admin check: CLIENT LIST without @admin is -NOPERM again", pass, fail);
+        int n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "PROXY", "POOLS") : -1;
+        CHECK(n > 0 && big2[0] != '-' && strstr(big2, "# Pools"), "admin check: PROXY POOLS isn't checked", pass, fail);
+        n = big2 ? resp_send_raw_reply(fn, big2, cap, 3, "PROXY", "INFO", "server") : -1;
+        CHECK(n > 0 && big2[0] != '-' && strstr(big2, "# Server"), "admin check: PROXY INFO isn't checked", pass, fail);
+        n = big2 ? resp_send_raw_reply(fn, big2, cap, 2, "INFO", "pools") : -1;
+        CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Pools"), "admin check: INFO pools isn't checked", pass, fail);
         proxy_cmd(fn, r, sizeof(r), 2, "DEL", "tc:acl:admin");
         CHECK(strcmp(r, ":1") == 0, "admin check: DEL as the user", pass, fail);
         /* AUTH default goes back to the default identity, which isn't checked. */
@@ -251,19 +244,15 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         const char *ok_users[2][2] = {{g_test_acl_user, g_test_acl_pass}, {g_test_acl_cl_user, g_test_acl_cl_pass}};
         const char *ok_labels[2] = {"+@all", "only +client|list"};
         for (int u = 0; u < 2; u++) {
-            char label[128];
+            char label[128], want[128];
+            snprintf(want, sizeof(want), "user=%s ", ok_users[u][0]);
             int fo = proxy_connect(host, port);
             proxy_cmd(fo, r, sizeof(r), 3, "AUTH", ok_users[u][0], ok_users[u][1]);
             snprintf(label, sizeof(label), "admin check: AUTH user with %s", ok_labels[u]);
             CHECK(strcmp(r, "+OK") == 0, label, pass, fail);
-            /* First command: PROXY INFO for one user, PROXY POOLS for the other. */
-            if (u == 0)
-                n = big2 ? resp_send_raw_reply(fo, big2, cap, 3, "PROXY", "INFO", "server") : -1;
-            else
-                n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "PROXY", "POOLS") : -1;
-            snprintf(label, sizeof(label), "admin check: PROXY %s allowed with %s", u == 0 ? "INFO" : "POOLS",
-                     ok_labels[u]);
-            CHECK(n > 0 && big2[0] != '-' && strstr(big2, u == 0 ? "# Server" : "# Pools"), label, pass, fail);
+            n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "CLIENT", "LIST") : -1;
+            snprintf(label, sizeof(label), "admin check: CLIENT LIST allowed with %s", ok_labels[u]);
+            CHECK(n > 0 && big2[0] == '$' && strstr(big2, want), label, pass, fail);
             /* ACL WHOAMI right after, on the probe's own connection: the
              * probe's reply didn't leak into it. The CLIENT LIST-only user
              * gets Valkey's own -NOPERM. */
@@ -272,50 +261,26 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
             CHECK(u == 0 ? strcmp(r, ok_users[u][0]) == 0
                          : strncmp(r, "-NOPERM", 7) == 0 && strstr(r, "'acl|whoami'") != NULL,
                   label, pass, fail);
-            /* Pipelined, so a reply out of order would show. */
-            char want[128];
-            snprintf(want, sizeof(want), "user=%s ", ok_users[u][0]);
+            /* Pipelined, from the cache, so a reply out of order would show. */
             const char *pipe2 = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*2\r\n$3\r\nACL\r\n$6\r\nWHOAMI\r\n";
             ssize_t wr = write(fo, pipe2, strlen(pipe2));
             (void)wr;
             int got = big2 ? resp_next_str(fo, big2, cap) != NULL : 0;
-            snprintf(label, sizeof(label), "admin check: CLIENT LIST allowed with %s", ok_labels[u]);
+            snprintf(label, sizeof(label), "admin check: pipelined CLIENT LIST allowed with %s", ok_labels[u]);
             CHECK(got && strstr(big2, want), label, pass, fail);
             got = resp_next_str(fo, r, sizeof(r)) != NULL;
             snprintf(label, sizeof(label), "admin check: a pipelined ACL WHOAMI after it, with %s", ok_labels[u]);
             CHECK(got && (u == 0 ? strcmp(r, ok_users[u][0]) == 0 : strstr(r, "'acl|whoami'") != NULL), label, pass,
                   fail);
-            if (u == 0)
-                n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "PROXY", "POOLS") : -1;
-            else
-                n = big2 ? resp_send_raw_reply(fo, big2, cap, 3, "PROXY", "INFO", "server") : -1;
-            snprintf(label, sizeof(label), "admin check: PROXY %s allowed with %s", u == 0 ? "POOLS" : "INFO",
-                     ok_labels[u]);
-            CHECK(n > 0 && big2[0] != '-' && strstr(big2, u == 0 ? "# Pools" : "# Server"), label, pass, fail);
-            n = big2 ? resp_send_raw_reply(fo, big2, cap, 2, "INFO", "pools") : -1;
-            snprintf(label, sizeof(label), "admin check: INFO pools has Pools with %s", ok_labels[u]);
-            CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Pools"), label, pass, fail);
             close(fo);
         }
 
         /* The backend closes the user's idle connection (timeout, restart):
-         * the probe finds it closed. INFO just leaves Pools out, other
-         * commands fail, and neither is cached, so the next probe opens a
-         * new connection. */
+         * the probe finds it closed. CLIENT LIST fails, nothing is cached,
+         * and the next probe opens a new connection. */
         int fk = proxy_connect(host, port);
         proxy_cmd(fk, r, sizeof(r), 3, "AUTH", g_test_acl_kill_user, g_test_acl_kill_pass);
         CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH user whose connection gets closed", pass, fail);
-        test_acl_fixture_kill_user(g_test_acl_kill_user);
-        n = big2 ? resp_send_raw_reply(fk, big2, cap, 2, "INFO", "everything") : -1;
-        CHECK(n > 0 && big2[0] == '$' && strstr(big2, "# Server") && !strstr(big2, "# Pools"),
-              "admin check: INFO everything on a closed connection leaves Pools out", pass, fail);
-        /* ACL WHOAMI goes on the probe's connection: it opens a new one. */
-        proxy_cmd(fk, r, sizeof(r), 2, "ACL", "WHOAMI");
-        CHECK(strcmp(r, g_test_acl_kill_user) == 0, "admin check: ACL WHOAMI on a new connection after INFO", pass,
-              fail);
-        /* AUTH again for a new connection to close. */
-        proxy_cmd(fk, r, sizeof(r), 3, "AUTH", g_test_acl_kill_user, g_test_acl_kill_pass);
-        CHECK(strcmp(r, "+OK") == 0, "admin check: AUTH again for a new connection", pass, fail);
         test_acl_fixture_kill_user(g_test_acl_kill_user);
         proxy_cmd(fk, r, sizeof(r), 2, "CLIENT", "LIST");
         CHECK(strncmp(r, "-ERR backend connection", 23) == 0,
@@ -334,6 +299,6 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         close(fk);
         free(big2);
     } else {
-        SKIP("admin check for CLIENT LIST / PROXY POOLS / PROXY INFO");
+        SKIP("admin check for CLIENT LIST");
     }
 }
