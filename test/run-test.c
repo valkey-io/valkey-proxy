@@ -37,8 +37,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --cluster=<host:port>  a backend cluster node: creates temporary ACL users\n"
                     "                 on every node for the AUTH / HELLO AUTH tests, deletes\n"
                     "                 them afterwards (without it those tests SKIP)\n");
-    fprintf(stderr, "  --reported=<host:port>  a second proxy whose config sets reported_version 8.0.2,\n"
-                    "                 reported_role replica and reported_modules search:10002,json:\n"
+    fprintf(stderr, "  --reported=<host:port>  a second proxy whose config sets reported-version 8.0.2,\n"
+                    "                 reported-role replica and reported-modules search:10002,json:\n"
                     "                 checks HELLO and INFO report the overrides (without it they SKIP)\n");
     fprintf(stderr, "  --bloomfilter  run Bloom Filter module tests only\n");
     fprintf(stderr, "  --json         run JSON module tests only\n");

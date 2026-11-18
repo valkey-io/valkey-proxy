@@ -113,7 +113,7 @@ server-ip    $HOST
 server-port  $BASE_PORT
 bind         $HOST
 port         $port
-cluster_refresh_interval_ms  500
+cluster-refresh-interval-ms  500
 $2
 EOF
     "$ROOT/valkey-proxy" "$conf" >"$CI_DIR/proxy-$port.log" 2>&1 &
@@ -125,9 +125,9 @@ EOF
 start_proxies() {
     mkdir -p "$CI_DIR"
     start_proxy "$PROXY_PORT" ""
-    start_proxy "$REPORTED_PORT" "reported_version  8.0.2
-reported_role     replica
-reported_modules  search:10002,json"
+    start_proxy "$REPORTED_PORT" "reported-version  8.0.2
+reported-role     replica
+reported-modules  search:10002,json"
 }
 
 run_tests() {

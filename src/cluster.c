@@ -117,14 +117,10 @@ static int intersect_modules(BackendModule *mods, int n, const BackendModule *ot
  * shards have would fail for keys on the others. Only nodes that own slots
  * are asked: a dead master stays in nodes[] until its index is reused, and
  * each one would cost a connect timeout on the refresh thread. The previous
- * values are kept if no node answers. Runs on every topology publish, and
- * every BACKEND_PROBE_INTERVAL_SEC otherwise, to catch in-place upgrades
- * and module loads that don't change the topology. */
-#define BACKEND_PROBE_INTERVAL_SEC 60
-static time_t last_probe;
-
+ * values are kept if no node answers. Runs at startup and on every
+ * topology publish only, so an in-place upgrade or a module load that
+ * doesn't change the topology isn't seen until the next one. */
 static void probe_backend_versions(const ClusterNode *nodes, int count, const int *has_slots) {
-    last_probe = time(NULL);
     static const char cmd[] = "*3\r\n$4\r\nINFO\r\n$6\r\nserver\r\n$7\r\nmodules\r\n";
     int ms = g_config.backend_connect_timeout_ms;
     char valkey_version[32] = "", redis_version[32] = "";
@@ -541,10 +537,7 @@ static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const
             }
     if (!changed) changed = (memcmp(old_slot, slot, sizeof(slot)) != 0);
 
-    if (!changed) {
-        if (difftime(now, last_probe) >= BACKEND_PROBE_INTERVAL_SEC) probe_backend_versions(nodes, count, has_slots);
-        return;
-    }
+    if (!changed) return;
 
     /* Only printed when the master set/topology actually changed this
      * round, with whatever's new/updated called out. */

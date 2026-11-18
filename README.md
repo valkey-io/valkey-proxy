@@ -48,6 +48,10 @@ for example `valkey-0.valkey-headless.session-storage.svc.cluster.local`.
 Hostnames are resolved to IPv4 addresses on every new connection, including
 periodic topology refresh, so a changed seed address is picked up without a
 proxy restart. Each returned address is tried until a connection succeeds.
+
+The proxy refuses to start if `server-port` or `port` is missing or outside
+1-65535, or if the file contains an option it doesn't know. Option names use
+`-` throughout (for example `max-connection`, not `max_connection`).
 The backend connection timeout applies to each TCP connection attempt; DNS
 resolution uses the system resolver's timeout.
 
@@ -60,11 +64,11 @@ worker-thread-no  1    # number of worker threads (default: 1)
 db                0    # default database (default: 0)
 
 # Connection pool sizes
-min_normal_connection        2
-min_blocking_connection      2
-min_subscription_connection  0
-min_transaction_connection   0
-min_acl_connection           0
+min-normal-connection        2
+min-blocking-connection      2
+min-subscription-connection  0
+min-transaction-connection   0
+min-acl-connection           0
 
 # TLS (client ↔ proxy)
 tls-enabled  no
@@ -104,7 +108,7 @@ Example:
 | `-h=<host>` | proxy IP address (default `127.0.0.1`) |
 | `-p=<port>` | proxy port (default `7777`) |
 | `--cluster=<host:port>` | **optional**, any *backend* cluster node (not the proxy) — enables the tests that need a real non-default ACL user, see below |
-| `--reported=<host:port>` | **optional**, a second proxy whose config sets `reported_version 8.0.2`, `reported_role replica` and `reported_modules search:10002,json`: checks that HELLO and INFO report the overrides (without it those tests SKIP) |
+| `--reported=<host:port>` | **optional**, a second proxy whose config sets `reported-version 8.0.2`, `reported-role replica` and `reported-modules search:10002,json`: checks that HELLO and INFO report the overrides (without it those tests SKIP) |
 | `--bloomfilter` / `--json` / `--search` | run that module suite |
 | `--string` / `--pubsub` | run only that suite |
 

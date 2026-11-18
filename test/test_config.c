@@ -30,6 +30,59 @@ static void check_config(const char *host) {
     assert(unlink(path) == 0);
 }
 
+/* Writes body to a temp config and reports parse_conf()'s exit status
+ * (0 if it returned). */
+static int parse_status(const char *body) {
+    char path[] = "/tmp/valkey-proxy-config-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    FILE *f = fdopen(fd, "w");
+    assert(f);
+    fputs(body, f);
+    assert(fclose(f) == 0);
+    fflush(NULL);
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        freopen("/dev/null", "w", stderr);
+        parse_conf(path);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(unlink(path) == 0);
+    assert(WIFEXITED(status));
+    return WEXITSTATUS(status);
+}
+
+static void check_validation(void) {
+    const char *base = "server-ip 127.0.0.1\nserver-port 6379\nport 7777\n";
+    char buf[512];
+    assert(parse_status(base) == 0);
+    /* comments, blank lines and indented comments are fine */
+    snprintf(buf, sizeof(buf), "# c\n\n   # indented\n\t\n%smax-multikey-payload 1048576\n", base);
+    assert(parse_status(buf) == 0);
+    /* every renamed option is accepted */
+    snprintf(buf, sizeof(buf),
+             "%smax-connection 100\ncluster-refresh-interval-ms 0\nbackend-multiplexing yes\n"
+             "min-normal-connection 1\nmax-acl-connection 5\nreported-role master\n",
+             base);
+    assert(parse_status(buf) == 0);
+    /* missing or invalid ports */
+    assert(parse_status("server-ip 127.0.0.1\nport 7777\n") == 1);
+    assert(parse_status("server-ip 127.0.0.1\nserver-port 6379\n") == 1);
+    assert(parse_status("server-ip 127.0.0.1\nserver-port 0\nport 7777\n") == 1);
+    assert(parse_status("server-ip 127.0.0.1\nserver-port 6379\nport 70000\n") == 1);
+    /* unknown options, including the old underscore spellings */
+    snprintf(buf, sizeof(buf), "%sno-such-option 1\n", base);
+    assert(parse_status(buf) == 1);
+    snprintf(buf, sizeof(buf), "%smax_connection 100\n", base);
+    assert(parse_status(buf) == 1);
+    /* an option with no value */
+    snprintf(buf, sizeof(buf), "%smax-connection\n", base);
+    assert(parse_status(buf) == 1);
+}
+
 int main(void) {
     check_config("127.0.0.1");
     check_config("valkey-cluster-0-0-0.valkey-cluster.session-storage-development.svc.cluster.local");
@@ -43,6 +96,8 @@ int main(void) {
     memset(too_long, 'a', sizeof(too_long) - 1);
     too_long[254] = '\0';
     check_config(too_long);
+
+    check_validation();
 
     int listener = socket(AF_INET, SOCK_STREAM, 0);
     assert(listener >= 0);

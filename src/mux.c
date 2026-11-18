@@ -2,7 +2,7 @@
 
 /* ── backend multiplexing ────────────────────────────────────────────────
  *
- * With backend_multiplexing on, single-key commands and fan-out commands
+ * With backend-multiplexing on, single-key commands and fan-out commands
  * (MGET/MSET/DEL/...) don't check a connection out of a pool for the length
  * of one request. Instead each (db, node) has a fixed set of POOL_SHARED
  * connections, and every request -- from any client, any number at a time --
