@@ -370,6 +370,10 @@ void pool_destroy_conn(Worker *w, PoolConn *c) {
         c->txn_client = NULL;
         if (tc->txn_conn == c) txn_conn_gone(tc, c);
     }
+    /* A client's own logged-in connection: forget it, so its next command
+     * opens a new one instead of reusing this slot. */
+    if (p->type == POOL_ACL && c->waiting_client && c->waiting_client->acl_conns[p->node_idx] == c)
+        c->waiting_client->acl_conns[p->node_idx] = NULL;
 
     printf("[worker %d] [pool:%s] destroy  fd=%-4d  node=%s:%d  db=%d  (pool count: %d→%d)\n", w->thread_id,
            POOL_NAME[p->type], c->fd, nd->ip, nd->port, c->db, p->count, p->count - 1);
@@ -575,8 +579,14 @@ void worker_sync_topology(Worker *w) {
                         } else if (!still_owns_slots && c->waiting_client) {
                             /* Symmetric case for an already-dispatched single-key
                              * request: same "nobody will ever release this"
-                             * reasoning as above. */
-                            client_recover_after_backend_error(w, c->waiting_client, c, "backend node unavailable");
+                             * reasoning as above. A client's own logged-in
+                             * connection keeps waiting_client while idle, and
+                             * then has no request to fail. */
+                            ClientConn *wc = c->waiting_client;
+                            if (p->type == POOL_ACL && c != wc->pending_conn && !c->acl_authenticating)
+                                pool_destroy_conn(w, c);
+                            else
+                                client_recover_after_backend_error(w, wc, c, "backend node unavailable");
                         } else {
                             c->discard_on_release = 1;
                         }

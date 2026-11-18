@@ -368,6 +368,10 @@ static int proxy_connect(const char *host, int port) {
  * tests that need a real non-default user must SKIP. */
 extern const char *g_test_acl_user, *g_test_acl_pass;
 extern const char *g_test_acl_ro_user, *g_test_acl_ro_pass;
+extern const char *g_test_acl_noadmin_user, *g_test_acl_noadmin_pass;
+extern const char *g_test_acl_cl_user, *g_test_acl_cl_pass;
+extern const char *g_test_acl_kill_user, *g_test_acl_kill_pass;
+void test_acl_fixture_kill_user(const char *user);
 
 #define SKIP(label) printf("  [SKIP] %s (needs --cluster=<host:port>)\n", (label))
 

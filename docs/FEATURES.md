@@ -124,6 +124,16 @@ workers that have this pool), the gauges `open`, `in_use` and `waiting`, and the
 `reconnects` and `destroys`. Counters are never reset; they keep counting when a node index is
 reassigned after a failover, which `gen` makes visible.
 
+`CLIENT LIST` is in Valkey's `@admin` category, so the proxy checks it as Valkey would. For a client
+logged in as a non-default user, the proxy asks Valkey: it sends a `CLIENT LIST ID` that matches no
+client on the user's own connection. Any error refuses the command, and the client gets that error.
+A `-NOPERM` is kept per user on each worker for 5 seconds, as is an answer that allows it. Other
+errors (e.g. `-BUSY`) aren't kept. If Valkey can't be asked (the connection was closed, the ACL pool
+for that node is full, or logging in to it fails), the command gets an error such as
+`-ERR backend connection closed`. Clients using the default identity aren't checked. `INFO` isn't
+an `@admin` command, and `PROXY POOLS` and `PROXY INFO` have no Valkey equivalent, so none of them
+is checked.
+
 ## 4. Blocking commands
 
 Blocking commands use a separate `POOL_BLOCKING` connection pool (long-lived, kept in blocking
