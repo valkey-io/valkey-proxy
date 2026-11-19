@@ -92,6 +92,10 @@ static void abs_path_or_copy(const char *path, char *out, size_t cap) {
         snprintf(out, cap, "%s", path ? path : "");
 }
 
+const char *info_config_file(void) {
+    return g_config_file;
+}
+
 void info_init(const char *argv0, const char *conf_path) {
     g_start_time = time(NULL);
     abs_path_or_copy(argv0, g_executable, sizeof(g_executable));

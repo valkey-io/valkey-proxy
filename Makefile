@@ -15,7 +15,7 @@ POOL_TARGET = valkey-proxy
 POOL_SRCS   = src/valkey-proxy.c src/config.c src/cluster.c src/resp.c \
               src/pool.c src/cmd.c src/fanout.c src/pubsub.c src/acl.c src/acl_cat.c src/client.c \
               src/hello.c src/event_loop.c src/metrics.c src/info.c src/mux.c \
-              src/client_list.c src/txn.c
+              src/client_list.c src/txn.c src/proxy_config.c
 BUILD_DIR   = build
 POOL_OBJS   = $(POOL_SRCS:%.c=$(BUILD_DIR)/%.o)
 
@@ -51,6 +51,7 @@ TEST_SRCS = test/run-test.c test/acl/test_acl.c test/acl/acl_fixture.c test/bitm
             test/list/test_list.c \
             test/pubsub/test_pubsub.c \
             test/transaction/test_transaction.c \
+            test/proxy_config/test_proxy_config.c \
             test/script/test_script.c \
             test/function/test_function.c \
             test/set/test_set.c \

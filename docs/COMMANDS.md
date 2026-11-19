@@ -353,6 +353,10 @@ The list below covers every supported command.
 | `PROXY HELP` | Answered by proxy |
 | `PROXY INFO` | Each primary's own INFO reply, unmerged; `SHARD <idx>\|<ip:port>` limits it to one |
 | `PROXY POOLS` | Answered by proxy; connection pool usage per backend node and pool type |
+| `PROXY CONFIG GET` | Answered by proxy, users in `proxy-config-admin-users` / `proxy-config-readonly-users` only; the proxy's own `proxy.conf` settings matching the glob patterns (CONFIG itself goes to the backends) |
+| `PROXY CONFIG SET` | Answered by proxy, users in `proxy-config-admin-users` only; changes proxy settings at runtime, see FEATURES.md §3.4 |
+| `PROXY CONFIG HELP` | Answered by proxy, users in `proxy-config-admin-users` / `proxy-config-readonly-users` only; GET/SET/SAVE syntax and the parameters settable at runtime |
+| `PROXY CONFIG SAVE` | Answered by proxy, users in `proxy-config-admin-users` only; writes current settings back to the startup config file, or to the given file |
 | `SLOWLOG GET` | Broadcast to every primary node |
 | `SLOWLOG HELP` | Forwarded to one primary node |
 | `SLOWLOG LEN` | Broadcast to every primary node |

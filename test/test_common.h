@@ -270,6 +270,17 @@ static __attribute__((unused)) int resp_send_raw_reply(int fd, char *out, int ou
 
 /* ── convenience wrappers ──────────────────────────────────────────────── */
 
+/* PROXY CONFIG GET <name>'s value as an int, or -1 if the reply isn't the
+ * one name/value pair (RESP2). */
+static __attribute__((unused)) int proxy_config_get_int(int fd, const char *name) {
+    char buf[512];
+    if (resp_send_raw_reply(fd, buf, sizeof(buf), 4, "PROXY", "CONFIG", "GET", name) <= 0) return -1;
+    if (strncmp(buf, "*2\r\n", 4) != 0) return -1;
+    const char *v = strstr(buf + 4, "\r\n$"); /* end of the name */
+    v = v ? strstr(v + 3, "\r\n") : NULL;     /* end of the value's $<len> line */
+    return v ? atoi(v + 2) : -1;
+}
+
 /* Send command (varargs strings), read first response token as text. */
 static __attribute__((unused)) char *proxy_cmd(int fd, char *out, int outsz, int argc, ...) {
     const char *args[64];

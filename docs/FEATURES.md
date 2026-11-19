@@ -124,6 +124,51 @@ workers that have this pool), the gauges `open`, `in_use` and `waiting`, and the
 `reconnects` and `destroys`. Counters are never reset; they keep counting when a node index is
 reassigned after a failover, which `gen` makes visible.
 
+`PROXY CONFIG GET <pattern> [<pattern> ...]` returns the proxy's own `proxy.conf` settings whose
+names match any of the glob patterns (case-insensitive, `*` `?` `\`), as name/value pairs (a map
+for a RESP3 client); `tls-key` is never shown. `PROXY CONFIG SET <parameter> <value> [<parameter>
+<value> ...]` changes them at runtime, in memory only until saved. Every pair is
+checked before anything changes, so one bad pair leaves all of them as they were. Errors use
+Valkey's `CONFIG SET` wording (`can't set immutable config`, `Unknown option ...`). Settable:
+
+| Setting | Accepts | Takes effect |
+|---|---|---|
+| `max-pipeline-inflight`, `max-multikey-payload`, `backend-connect-timeout-ms` | ≥ 1 | On the next command / connect |
+| `transaction-replay-buffer-size`, `cluster-node-fail-grace-ms` | ≥ 0 | On the next transaction / refresh cycle |
+| `cluster-refresh-interval-ms` | ≥ 0 | From the next cycle; 0 pauses refresh, and a positive value starts it if it was off at startup |
+| `min-<pool>-connection` / `max-<pool>-connection` (`normal`, `blocking`, `subscription`, `transaction`, `acl`) | min ≥ 0, 1 ≤ max ≤ `max-connection`, min ≤ max | Each worker resizes its own pools as soon as it wakes: raising `min` opens connections up to it, raising `max` hands the new room to clients waiting for a connection, lowering `max` closes idle connections past it at once and busy ones as they're released |
+
+The rest (listen address, `worker-thread-no`, `max-connection`, `db`, `backend-multiplexing`,
+`shared-connection-per-node`, TLS, `reported-*`, the `proxy-config-*-users` lists) is fixed at
+startup. `PROXY CONFIG HELP` prints
+the syntax and the settable parameters with the values each accepts.
+
+`PROXY CONFIG SAVE [<file>]` writes the config file the proxy was started with again, with the
+settable parameters' current values: over the startup file itself, or to `<file>` (relative to the
+proxy's working directory). The startup file is the template either way, so the result is a whole
+config the proxy can start from: every other line, comments included, is kept, and a settable
+parameter keeps its line and only gets its value replaced. A settable parameter the file doesn't
+mention is appended under `# Added by PROXY CONFIG SAVE`, but only if its value changed since
+startup. The file is written to a temporary file beside it and renamed over it, keeping an existing
+file's permissions, so a failed save leaves the old file intact.
+
+Who may run `PROXY CONFIG` is set in `proxy.conf`, not by the users' ACL rules on the backends:
+
+```
+proxy-config-admin-users     ops,lucas    # GET, SET, SAVE and HELP
+proxy-config-readonly-users  monitor      # GET and HELP only
+```
+
+A client must first `AUTH <user> <password>` (or `HELLO ... AUTH`) as an ACL user that exists on
+the backends, which check the password; the proxy then lets it in by name. Names are
+comma-separated without spaces, and either line may be repeated to extend its list. Neither set
+means nobody may run `PROXY CONFIG`. The default identity -- a client that never sent `AUTH`, or
+went back to it with `AUTH default` -- is always refused with `-NOPERM the default user can't run
+the 'proxy|config|<sub>' command`; a user in neither list (or a read-only one running `SET` or
+`SAVE`) gets `-NOPERM User <name> has no permissions to run the 'proxy|config|<sub>' command (not
+in ...)`. Both lists are fixed at startup: `GET` shows them, `SET` refuses them. `PROXY HELP`
+itself isn't restricted.
+
 `CLIENT LIST` is in Valkey's `@admin` category, so the proxy checks it as Valkey would. For a client
 logged in as a non-default user, the proxy asks Valkey: it sends a `CLIENT LIST ID` that matches no
 client on the user's own connection. Any error refuses the command, and the client gets that error.
@@ -170,6 +215,7 @@ directly affect command behavior are listed here:
 | `transaction-replay-buffer-size` | 1048576 | Most bytes of queued commands kept per transaction for replaying it on the new node after `-MOVED` (see §8); 0 disables replay |
 | `min-acl-connection` / `max-acl-connection` | 0 / 10 | `ACL`/`AUTH`, plus each authenticated client's dedicated per-node connections |
 | `cluster-refresh-interval-ms` | 500 | How often (ms) the cluster topology is refreshed in the background; 0 disables it |
+| `proxy-config-admin-users` / `proxy-config-readonly-users` | unset | ACL users (after `AUTH`) who may run every `PROXY CONFIG` subcommand / only `GET` and `HELP`; unset means nobody (see §3.4) |
 | `max-connection` | 4000 | Per-worker-thread fd budget (client sockets + backend connections + listener fd(s)) |
 | `max-multikey-payload` | 67108864 (64MB) | Largest command held in full before forwarding (multi-key fan-out such as `MGET`/`MSET`/`DEL`, blocking commands, `AUTH`); a larger one gets `-ERR command too large` |
 | `backend-multiplexing` | yes | Single-key and fan-out commands share a fixed set of connections per node and run concurrently within a pipeline (see §7) |
