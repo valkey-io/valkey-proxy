@@ -139,6 +139,10 @@ void parse_conf(const char *path) {
         fprintf(stderr, "%s: port must be set to a port number between 1 and 65535\n", path);
         exit(1);
     }
+    if (g_config.db < 0) {
+        fprintf(stderr, "Warning: db can't be negative (got %d); falling back to default 0\n", g_config.db);
+        g_config.db = 0;
+    }
     if (g_config.max_multikey_payload <= 0) {
         fprintf(stderr, "Warning: max-multikey-payload must be positive (got %d); falling back to default %d\n",
                 g_config.max_multikey_payload, DEFAULT_MAX_MULTIKEY_PAYLOAD);

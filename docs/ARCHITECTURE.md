@@ -216,13 +216,49 @@ database × node × pool type:
 | `POOL_ACL` | Connections logged in as a client's own ACL user, including for that user's transactions. |
 | `POOL_SHARED` | Connections shared by many requests at once, when `backend-multiplexing` is on. |
 
-The first five pools lend out connections **one request at a time**. A command borrows a connection
-(`pool_acquire_nb()`) and gives it back when it's done (`pool_release()`); if someone is already
-waiting, the connection goes straight to them. If no connection is free, the client waits in the
-pool's `wait_queue`.
+The first five pools give each connection to one user at a time. At startup each pool opens its
+`min` connections. When a connection is needed, the pool hands out an idle one, or opens a new one
+if it's below `max`. A connection that is given back goes to the next waiting client, or becomes
+idle. Idle connections are never closed, so a pool doesn't shrink once it has grown.
 
-Pools for a database are created the first time a client `SELECT`s it (`db_group_get()`). For any
-database other than 0, each new connection sends `SELECT <db>` before it's used.
+`POOL_NORMAL` serves one command at a time: a single-key command, or one node's part of a fan-out
+command. The connection is given back as soon as the reply has been read. When the pool is full, a
+single-key command waits for a free connection, while a fan-out command fails. With
+`backend-multiplexing` on, these commands use `POOL_SHARED` instead, and `POOL_NORMAL` is only used
+for the rest (keyless commands, `HELP` subcommands, commands too large to buffer, ...).
+
+`POOL_BLOCKING` works the same way for blocking commands: the connection is held until the command
+returns, then given back. When the pool is full, the client waits.
+
+`POOL_SUBSCRIPTION` gives a client its own connection on its first `SUBSCRIBE`. The client keeps it
+until it has unsubscribed from everything or disconnects. The connection is then closed, not given
+back. When the pool is full, the client gets an error.
+
+`POOL_TRANSACTION` holds a transaction. `MULTI` itself is answered by the proxy, so no connection
+is taken yet. The first `WATCH` or the first queued command with a key decides the slot, and so the
+node, of the whole transaction. The client then takes a connection to that node and keeps it until
+`EXEC`, `DISCARD` or `UNWATCH`, after which the connection goes back to the pool. If the
+transaction breaks off or the client disconnects, the connection is closed instead, since it may
+still be inside a `MULTI` or hold a `WATCH`. If the connection is lost in the middle, a `WATCH` on it
+is lost too (`EXEC` then answers nil), and a `MULTI` on it fails (`EXEC` then answers
+`-EXECABORT`). When the pool is full, the client waits.
+
+`POOL_ACL` is for clients logged in as a non-default user. On `AUTH user pass`, the proxy takes a
+connection to the first primary and sends the `AUTH` there. If it succeeds, that connection belongs
+to the client. The first time the client's commands go to another node, it takes one more
+connection, logged in the same way, to that node. The client keeps these connections between
+commands and never gives them back. They are closed when the client logs in again (including
+`AUTH default`) or disconnects. Single-key commands, multi-key commands in one slot, blocking
+commands and transactions of such a client run on these connections. Fan-out commands, keyless
+commands and Pub/Sub still use the other pools, as the default user. When the pool is full, `AUTH`
+or the command gets an error.
+
+When a node is replaced (for example after a failover), idle connections to it are closed, and
+connections in use reconnect to the new node when they are given back.
+
+Each worker creates the pools for the configured `db` at startup (`db_group_get()`); all clients use
+that one database. If `db` isn't 0, each new connection sends `SELECT <db>` before it's used. A client
+`SELECT` is answered locally: `+OK` for the configured index, `-ERR DB index is out of range` otherwise.
 
 #### Multiplexing (`backend-multiplexing yes`)
 
