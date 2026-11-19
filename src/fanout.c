@@ -3759,20 +3759,32 @@ void handle_noslot_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdle
         return;
     }
     if (!strcmp(cmd, "SELECT")) {
-        const char *key;
-        int kl;
-        int db = 0;
-        if (resp_get_nth_arg(client->hbuf, cmdlen, 1, &key, &kl)) {
-            char tmp[16];
-            int tl = kl < 15 ? kl : 15;
-            memcpy(tmp, key, (size_t)tl);
-            tmp[tl] = '\0';
-            db = atoi(tmp);
+        /* Every client is pinned to the db set by the "db" config option:
+         * accept SELECT only for that index (a no-op), reject any other. */
+        const char *key, *extra;
+        int kl, el;
+        if (!resp_get_nth_arg(client->hbuf, cmdlen, 1, &key, &kl) ||
+            resp_get_nth_arg(client->hbuf, cmdlen, 2, &extra, &el)) {
+            client_send_error(w, client, "wrong number of arguments for 'select' command");
+            client->hbuf_len = 0;
+            return;
         }
-        if (db != 0) {
-            const char *e = "-ERR DB index is out of range\r\n";
-            ssize_t wr = write(client->fd, e, strlen(e));
-            (void)wr;
+        char tmp[24];
+        char *end = NULL;
+        long db = -1;
+        if (kl > 0 && kl < (int)sizeof(tmp)) {
+            memcpy(tmp, key, (size_t)kl);
+            tmp[kl] = '\0';
+            errno = 0;
+            db = strtol(tmp, &end, 10);
+        }
+        if (kl <= 0 || kl >= (int)sizeof(tmp) || errno || *end != '\0') {
+            client_send_error(w, client, "value is not an integer or out of range");
+            client->hbuf_len = 0;
+            return;
+        }
+        if (db != g_config.db) {
+            client_send_error(w, client, "DB index is out of range");
             client->hbuf_len = 0;
             return;
         }

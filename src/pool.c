@@ -38,8 +38,9 @@ static void pool_stats_handoff(ConnPool *p, ClientConn *client) {
 
 /* ── connection pool ────────────────────────────────────────────────── */
 static int send_select(int fd, int db) {
-    char cmd[64];
-    int n = snprintf(cmd, sizeof(cmd), "*2\r\n$6\r\nSELECT\r\n$%d\r\n%d\r\n", db < 10 ? 1 : db < 100 ? 2 : 3, db);
+    char cmd[64], num[16];
+    int nl = snprintf(num, sizeof(num), "%d", db);
+    int n = snprintf(cmd, sizeof(cmd), "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n", nl, num);
     if (write(fd, cmd, (size_t)n) != n) return -1;
     char resp[32];
     ssize_t r = read(fd, resp, sizeof(resp) - 1);

@@ -162,7 +162,7 @@
         <text x="822" y="678" class="t-mono t-sub t-end">0–10</text>
 
         <!-- worker footnotes -->
-        <text x="410" y="730" class="t-sans t-tiny">• pools exist per db × node; a db's pools open on first SELECT</text>
+        <text x="410" y="730" class="t-sans t-tiny">• pools exist per node for the configured db (opened at startup)</text>
         <text x="410" y="748" class="t-sans t-tiny">• stops reading a client at max-pipeline-inflight (256) or 4 MB of unsent replies</text>
         <text x="410" y="766" class="t-sans t-tiny">• commands that can't be multiplexed wait for every earlier reply first</text>
 
