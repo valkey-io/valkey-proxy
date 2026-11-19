@@ -381,15 +381,17 @@ void run_proxy_config_tests(const char *host, int port, int *pass, int *fail) {
     CHECK(node_open_busy >= 2 && node_open <= node_max,
           "lower max-blocking-connection while busy: closed once released", pass, fail);
 
-    /* Raising min opens connections up to it, on every node. */
-    proxy_cmd(fd, r, sizeof(r), 7, "PROXY", "CONFIG", "SET", "max-blocking-connection", "3", "min-blocking-connection",
-              "2");
-    CHECK(strcmp(r, "+OK") == 0, "SET max/min-blocking-connection 3/2: +OK", pass, fail);
+    /* Raising min opens connections up to it, on every node. Both values
+     * differ from the defaults (10/2) so SAVE below writes them even when
+     * the startup file doesn't mention them. */
+    proxy_cmd(fd, r, sizeof(r), 7, "PROXY", "CONFIG", "SET", "max-blocking-connection", "4", "min-blocking-connection",
+              "3");
+    CHECK(strcmp(r, "+OK") == 0, "SET max/min-blocking-connection 4/3: +OK", pass, fail);
     long long nlive = 0;
     for (int ni = 0; ni < nnodes; ni++)
         if (pools_sum(fd, "blocking", ni, "max") > 0) nlive++;
-    long long opened = pools_wait(fd, "blocking", -1, "open", '>', 2 * nlive);
-    CHECK(nlive > 0 && opened >= 2 * nlive, "raise min-blocking-connection: connections opened up to it", pass, fail);
+    long long opened = pools_wait(fd, "blocking", -1, "open", '>', 3 * nlive);
+    CHECK(nlive > 0 && opened >= 3 * nlive, "raise min-blocking-connection: connections opened up to it", pass, fail);
     for (int i = 0; i < nclients; i++) proxy_cmd(fd, r, sizeof(r), 2, "DEL", keys[i]);
 
     /* ── SAVE ─────────────────────────────────────────────────────────── */
@@ -410,8 +412,8 @@ void run_proxy_config_tests(const char *host, int port, int *pass, int *fail) {
     if (flen >= 0) {
         CHECK(file_has_setting(big, "max-pipeline-inflight", orig_inflight + 7), "SAVE <file>: has the value SET gave",
               pass, fail);
-        CHECK(file_has_setting(big, "max-blocking-connection", 3) &&
-                  file_has_setting(big, "min-blocking-connection", 2),
+        CHECK(file_has_setting(big, "max-blocking-connection", 4) &&
+                  file_has_setting(big, "min-blocking-connection", 3),
               "SAVE <file>: has the pool sizes SET gave", pass, fail);
         CHECK(strstr(big, "server-port") != NULL, "SAVE <file>: a whole config, startup-only settings kept", pass,
               fail);
