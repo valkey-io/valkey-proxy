@@ -74,9 +74,9 @@ Each section comes from one of three sources:
 
 | Section | Source |
 |---|---|
-| `server` | Proxy. `redis_version`/`valkey_version` are the lowest seen across the shards (probed at startup, after each topology change, and every 60s with periodic refresh on; with refresh off, only at startup. A master that doesn't answer a probe is left out until the next one); `server_mode:standalone`; uptime, `process_id`, `run_id`, `tcp_port`, `executable`, `config_file` and listeners are the proxy's own; adds `proxy_version` |
+| `server` | Proxy. `redis_version`/`valkey_version` are the lowest seen across the shards (probed at startup and after each topology change, so an in-place upgrade that leaves the topology unchanged shows up only after the next change or a restart. A master that doesn't answer a probe is left out until the next one); `server_mode:standalone`; uptime, `process_id`, `run_id`, `tcp_port`, `executable`, `config_file` and listeners are the proxy's own; adds `proxy_version` |
 | `tls` | Proxy. Serial and seconds to expiry of the proxy's server certificate; the client and CA fields stay `none`/`0` |
-| `clients` | Proxy. `connected_clients` across all workers, `maxclients` = `max_connection` |
+| `clients` | Proxy. `connected_clients` across all workers, `maxclients` = `max-connection` |
 | `replication` | Proxy. `role` is the one `HELLO` reports, `connected_slaves:0`. The backends' own replication is in `PROXY INFO replication` |
 | `cluster` | Proxy. Always `cluster_enabled:0` |
 | `keyspace` | Every master, summed per db (`avg_ttl` weighted by `expires`), so it agrees with `DBSIZE` |
@@ -99,8 +99,8 @@ string, as from Valkey.
 `HELLO` reports `server` `valkey-proxy` and `mode` `standalone`. `version`, `role` and `modules`
 follow the backends: the lowest version across the masters (the same one `INFO server` shows),
 `master`, and the modules loaded on every master. Each one can be overridden in the config with
-`reported_version`, `reported_role` and `reported_modules`. `reported_version` also applies to
-`INFO server`, and `reported_role` to `INFO replication`. On Valkey, `reported_version` changes
+`reported-version`, `reported-role` and `reported-modules`. `reported-version` also applies to
+`INFO server`, and `reported-role` to `INFO replication`. On Valkey, `reported-version` changes
 `valkey_version`; `redis_version` stays as the backends report it (7.2.4 on Valkey), as on a direct
 connection.
 
@@ -163,33 +163,34 @@ directly affect command behavior are listed here:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `min_normal_connection` / `max_normal_connection` | 2 / 20 | Pool used by the vast majority of read/write commands |
-| `min_blocking_connection` / `max_blocking_connection` | 2 / 10 | `BLPOP` and other blocking commands |
-| `min_subscription_connection` / `max_subscription_connection` | 0 / 10 | Pub/Sub |
-| `min_transaction_connection` / `max_transaction_connection` | 0 / 10 | Connections pinned by transactions (see §8); when all are in use, further transactions wait for one |
-| `transaction_replay_buffer_size` | 1048576 | Most bytes of queued commands kept per transaction for replaying it on the new node after `-MOVED` (see §8); 0 disables replay |
-| `min_acl_connection` / `max_acl_connection` | 0 / 10 | `ACL`/`AUTH`, plus each authenticated client's dedicated per-node connections |
-| `cluster_refresh_interval_ms` | 0 (disabled) | Whether/how often the cluster topology is refreshed in the background |
-| `max_connection` | 4000 | Per-worker-thread fd budget (client sockets + backend connections + listener fd(s)) |
-| `backend_multiplexing` | yes | Single-key and fan-out commands share a fixed set of connections per node and run concurrently within a pipeline (see §7) |
-| `shared_connection_per_node` | 4 | Size of that shared pool, per node (per db, per worker thread); fixed, a restart is needed to change it |
-| `max_pipeline_inflight` | 256 | Most commands one client may have in flight before the proxy stops reading from it |
+| `min-normal-connection` / `max-normal-connection` | 2 / 20 | Pool used by the vast majority of read/write commands |
+| `min-blocking-connection` / `max-blocking-connection` | 2 / 10 | `BLPOP` and other blocking commands |
+| `min-subscription-connection` / `max-subscription-connection` | 0 / 10 | Pub/Sub |
+| `min-transaction-connection` / `max-transaction-connection` | 0 / 10 | Connections pinned by transactions (see §8); when all are in use, further transactions wait for one |
+| `transaction-replay-buffer-size` | 1048576 | Most bytes of queued commands kept per transaction for replaying it on the new node after `-MOVED` (see §8); 0 disables replay |
+| `min-acl-connection` / `max-acl-connection` | 0 / 10 | `ACL`/`AUTH`, plus each authenticated client's dedicated per-node connections |
+| `cluster-refresh-interval-ms` | 500 | How often (ms) the cluster topology is refreshed in the background; 0 disables it |
+| `max-connection` | 4000 | Per-worker-thread fd budget (client sockets + backend connections + listener fd(s)) |
+| `max-multikey-payload` | 67108864 (64MB) | Largest command held in full before forwarding (multi-key fan-out such as `MGET`/`MSET`/`DEL`, blocking commands, `AUTH`); a larger one gets `-ERR command too large` |
+| `backend-multiplexing` | yes | Single-key and fan-out commands share a fixed set of connections per node and run concurrently within a pipeline (see §7) |
+| `shared-connection-per-node` | 4 | Size of that shared pool, per node (per db, per worker thread); fixed, a restart is needed to change it |
+| `max-pipeline-inflight` | 256 | Most commands one client may have in flight before the proxy stops reading from it |
 
 ## 7. Pipelining and backend multiplexing
 
-With `backend_multiplexing yes` (the default):
+With `backend-multiplexing yes` (the default):
 
-- **Which commands are multiplexed**: single-key commands, and the fan-out commands in §2 (`MGET`, `MSET`, `DEL`, `EXISTS`, ...), whenever the whole command fits in 16KB. Instead of checking a connection out of the normal pool for one request, they are written to one of `shared_connection_per_node` connections to the target node, many requests at a time. Replies come back in write order on each connection.
+- **Which commands are multiplexed**: single-key commands, and the fan-out commands in §2 (`MGET`, `MSET`, `DEL`, `EXISTS`, ...), whenever the whole command fits in 16KB. Instead of checking a connection out of the normal pool for one request, they are written to one of `shared-connection-per-node` connections to the target node, many requests at a time. Replies come back in write order on each connection.
 - **Pipelines run concurrently**: a client's pipelined commands are all sent at once, across nodes, rather than one after the other. Replies are still returned to the client in command order.
-- **Per-key order**: the shared connection is chosen by `slot % shared_connection_per_node`, so every command on one key, from any client, goes down the same connection and runs in the order the proxy received it.
+- **Per-key order**: the shared connection is chosen by `slot % shared-connection-per-node`, so every command on one key, from any client, goes down the same connection and runs in the order the proxy received it.
 - **Everything else is a barrier**: any other command in a pipeline (keyless commands, blocking commands, `SUBSCRIBE`, `AUTH`/`ACL`/`HELLO`/`SELECT`, `EVAL`, commands larger than 16KB, ...) waits until every reply before it has been written to the client, then runs exactly as with multiplexing off. The same applies to clients in a transaction or subscribed, and clients that `AUTH`ed as a non-default user.
-- **Backpressure**: the proxy stops reading a client's commands while it has `max_pipeline_inflight` in flight, or more than 4MB of replies waiting to be written to it.
+- **Backpressure**: the proxy stops reading a client's commands while it has `max-pipeline-inflight` in flight, or more than 4MB of replies waiting to be written to it.
 - **Failures**: if a shared connection breaks, or its node is replaced in a failover, every request in flight on it gets an `-ERR` reply (the client stays connected) and the connection is reopened on next use.
 - **RESP3**: once a client has switched to RESP3 with `HELLO 3`, shared connections switch too (a `HELLO 3` queued ahead of the next request on each); RESP2 clients' replies are converted back as before.
 
 `PROXY POOLS` reports the shared pool as `pool_db<N>_n<N>_shared`, where `open` is the number of connected shared connections and `in_use` the number of requests currently in flight on them.
 
-With `backend_multiplexing no`, every command is handled one at a time per client on a connection checked out of the normal pool, as before.
+With `backend-multiplexing no`, every command is handled one at a time per client on a connection checked out of the normal pool, as before.
 
 ## 8. Transactions
 
@@ -217,7 +218,7 @@ on one backend connection, pinned to the client from its first `WATCH` or first 
   moved since, the backend answers `-MOVED`, having run nothing. A transaction without `WATCH` is
   then replayed on the new node from the queued commands, and the client sees the normal replies.
   Replay is skipped, and the `-MOVED` returned, when the transaction has more than
-  `transaction_replay_buffer_size` bytes of queued commands, the new node isn't in the proxy's
+  `transaction-replay-buffer-size` bytes of queued commands, the new node isn't in the proxy's
   topology yet, or it has already been redirected twice. With `WATCH`, `EXEC` returns nil instead.
   `-ASK` and `-TRYAGAIN` (a slot migration in progress) are returned as-is.
 - **RESP3**: a RESP2 client gets each element of `EXEC`'s reply converted like the reply to the

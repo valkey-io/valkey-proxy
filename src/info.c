@@ -119,7 +119,7 @@ void info_set_backend_info(const char *valkey_version, const char *redis_version
     pthread_mutex_unlock(&g_backend_ver_lock);
 }
 
-/* reported_version replaces the version the backend itself reports in
+/* reported-version replaces the version the backend itself reports in
  * HELLO: valkey_version, or redis_version for a Redis backend. */
 void info_get_reported_versions(char *valkey_version, size_t vcap, char *redis_version, size_t rcap) {
     pthread_mutex_lock(&g_backend_ver_lock);
@@ -137,7 +137,7 @@ const char *info_reported_role(void) {
     return g_config.reported_role[0] ? g_config.reported_role : "master";
 }
 
-/* reported_modules is "none", or a comma-separated list of name or
+/* reported-modules is "none", or a comma-separated list of name or
  * name:ver (ver defaults to 0). */
 int info_get_reported_modules(BackendModule *out, int cap) {
     if (cap > MAX_BACKEND_MODULES) cap = MAX_BACKEND_MODULES;

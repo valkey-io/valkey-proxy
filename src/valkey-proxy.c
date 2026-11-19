@@ -4,7 +4,7 @@
 #include <signal.h>
 
 /* ── global definitions ─────────────────────────────────────────────── */
-/* POOL_SHARED's entries are overwritten by shared_connection_per_node in
+/* POOL_SHARED's entries are overwritten by shared-connection-per-node in
  * parse_conf(): that pool is always exactly that size. */
 int g_pool_min[POOL_TYPE_COUNT] = {2, 2, 0, 0, 0, 4};
 int g_pool_max[POOL_TYPE_COUNT] = {20, 10, 10, 10, 10, 4};
@@ -29,7 +29,7 @@ SSL_CTX *g_ssl_ctx = NULL;
 /* g_config.max_connection only caps how many fds the proxy's own bookkeeping
  * arrays can index; the OS-level RLIMIT_NOFILE soft limit is what actually
  * determines whether accept()/connect() can hand out fds that high. Raise
- * it to cover max_connection plus a small margin for stdio/log fds, falling
+ * it to cover max-connection plus a small margin for stdio/log fds, falling
  * back to whatever the hard limit allows. */
 static void adjust_open_files_limit(void) {
     rlim_t want = (rlim_t)g_config.max_connection + 64;
@@ -47,10 +47,10 @@ static void adjust_open_files_limit(void) {
                 "Warning: could not raise RLIMIT_NOFILE to %llu (stuck at %llu); "
                 "effective connection capacity is reduced accordingly, since "
                 "client and backend connections share this fd budget. Raise the "
-                "'nofile' limit for this process/user to reach max_connection=%d.\n",
+                "'nofile' limit for this process/user to reach max-connection=%d.\n",
                 (unsigned long long)want, (unsigned long long)lim.rlim_cur, g_config.max_connection);
     } else {
-        printf("Raised RLIMIT_NOFILE: %llu -> %llu (max_connection=%d)\n", (unsigned long long)old_soft,
+        printf("Raised RLIMIT_NOFILE: %llu -> %llu (max-connection=%d)\n", (unsigned long long)old_soft,
                (unsigned long long)lim.rlim_cur, g_config.max_connection);
     }
 }
@@ -267,7 +267,7 @@ static void *worker_thread(void *arg) {
     w->input_ready = calloc((size_t)g_config.max_connection, sizeof(*w->input_ready));
     w->input_ready_len = 0;
     if (!w->client_map || !w->backend_map || !w->fd_mask || !w->input_ready) {
-        fprintf(stderr, "out of memory allocating connection tables (max_connection=%d)\n", g_config.max_connection);
+        fprintf(stderr, "out of memory allocating connection tables (max-connection=%d)\n", g_config.max_connection);
         atomic_store_explicit(&w->handoff_ready, -1, memory_order_release);
         return worker_failed();
     }
@@ -404,7 +404,7 @@ int main(int argc, char **argv) {
             exit(1);
         }
         if (wakefds[0] >= g_config.max_connection) {
-            fprintf(stderr, "wake pipe fd %d is past max_connection %d\n", wakefds[0], g_config.max_connection);
+            fprintf(stderr, "wake pipe fd %d is past max-connection %d\n", wakefds[0], g_config.max_connection);
             exit(1);
         }
         set_nonblocking(wakefds[0]);
@@ -421,7 +421,7 @@ int main(int argc, char **argv) {
         if (shared * 2 > g_config.max_connection)
             fprintf(stderr,
                     "Warning: shared connections alone (%ld = %d per node x %d node(s) x %d worker(s), per db) "
-                    "take over half of max_connection (%d)\n",
+                    "take over half of max-connection (%d)\n",
                     shared, g_config.shared_connection_per_node, g_node_count, g_config.worker_thread_no,
                     g_config.max_connection);
     }

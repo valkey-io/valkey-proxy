@@ -3,9 +3,11 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 
-#define DEFAULT_BACKEND_CONNECT_TIMEOUT_MS 1000
-#define DEFAULT_SHARED_CONNECTION_PER_NODE 4
-#define DEFAULT_MAX_PIPELINE_INFLIGHT      256
+#define DEFAULT_BACKEND_CONNECT_TIMEOUT_MS  1000
+#define DEFAULT_SHARED_CONNECTION_PER_NODE  4
+#define DEFAULT_MAX_PIPELINE_INFLIGHT       256
+#define DEFAULT_CLUSTER_REFRESH_INTERVAL_MS 500
+#define DEFAULT_MAX_MULTIKEY_PAYLOAD        (64 * 1024 * 1024)
 
 /* ── config parsing ─────────────────────────────────────────────────── */
 /* For the reported_* settings, where a value cut short at a space or at
@@ -27,19 +29,28 @@ void parse_conf(const char *path) {
     g_config.worker_thread_no = 1;
     g_config.db = 0;
     g_config.tls_enabled = 0;
-    g_config.max_multikey_payload = 64 * 1024 * 1024;
+    g_config.max_multikey_payload = DEFAULT_MAX_MULTIKEY_PAYLOAD;
     g_config.max_connection = DEFAULT_MAX_CONNECTIONS;
-    g_config.cluster_refresh_interval_ms = 0; /* 0 = periodic refresh disabled */
+    g_config.cluster_refresh_interval_ms = DEFAULT_CLUSTER_REFRESH_INTERVAL_MS; /* 0 = periodic refresh disabled */
     g_config.cluster_node_fail_grace_ms = 10000;
     g_config.backend_connect_timeout_ms = DEFAULT_BACKEND_CONNECT_TIMEOUT_MS;
     g_config.backend_multiplexing = 1;
     g_config.shared_connection_per_node = DEFAULT_SHARED_CONNECTION_PER_NODE;
     g_config.max_pipeline_inflight = DEFAULT_MAX_PIPELINE_INFLIGHT;
     g_config.transaction_replay_buffer_size = 1024 * 1024;
+    int have_server_port = 0, have_port = 0;
     char line[512], key[64], val[448];
+    int lineno = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '\n') continue;
-        if (sscanf(line, "%63s %447s", key, val) != 2) continue;
+        lineno++;
+        const char *p = line;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p == '\0' || *p == '#') continue;
+        int n = sscanf(p, "%63s %447s", key, val);
+        if (n != 2) {
+            fprintf(stderr, "%s:%d: config option \"%s\" has no value\n", path, lineno, key);
+            exit(1);
+        }
         if (!strcmp(key, "server-ip")) {
             if (strlen(val) >= sizeof(g_config.server_ip)) {
                 fprintf(stderr, "server-ip exceeds the maximum hostname length of %zu characters\n",
@@ -47,13 +58,15 @@ void parse_conf(const char *path) {
                 exit(1);
             }
             snprintf(g_config.server_ip, sizeof(g_config.server_ip), "%s", val);
-        } else if (!strcmp(key, "server-port"))
+        } else if (!strcmp(key, "server-port")) {
             g_config.server_port = atoi(val);
-        else if (!strcmp(key, "bind"))
+            have_server_port = 1;
+        } else if (!strcmp(key, "bind"))
             snprintf(g_config.bind_ip, 64, "%.63s", val);
-        else if (!strcmp(key, "port"))
+        else if (!strcmp(key, "port")) {
             g_config.proxy_port = atoi(val);
-        else if (!strcmp(key, "worker-thread-no"))
+            have_port = 1;
+        } else if (!strcmp(key, "worker-thread-no"))
             g_config.worker_thread_no = atoi(val);
         else if (!strcmp(key, "db"))
             g_config.db = atoi(val);
@@ -65,77 +78,96 @@ void parse_conf(const char *path) {
             snprintf(g_config.tls_cert, 256, "%.255s", val);
         else if (!strcmp(key, "tls-key"))
             snprintf(g_config.tls_key, 256, "%.255s", val);
-        else if (!strcmp(key, "max_multikey_payload"))
+        else if (!strcmp(key, "max-multikey-payload"))
             g_config.max_multikey_payload = atoi(val);
-        else if (!strcmp(key, "max_connection"))
+        else if (!strcmp(key, "max-connection"))
             g_config.max_connection = atoi(val);
-        else if (!strcmp(key, "cluster_refresh_interval_ms"))
+        else if (!strcmp(key, "cluster-refresh-interval-ms"))
             g_config.cluster_refresh_interval_ms = atoi(val);
-        else if (!strcmp(key, "cluster_node_fail_grace_ms"))
+        else if (!strcmp(key, "cluster-node-fail-grace-ms"))
             g_config.cluster_node_fail_grace_ms = atoi(val);
-        else if (!strcmp(key, "backend_connect_timeout_ms"))
+        else if (!strcmp(key, "backend-connect-timeout-ms"))
             g_config.backend_connect_timeout_ms = atoi(val);
-        else if (!strcmp(key, "backend_multiplexing"))
+        else if (!strcmp(key, "backend-multiplexing"))
             g_config.backend_multiplexing = (!strcmp(val, "yes"));
-        else if (!strcmp(key, "shared_connection_per_node"))
+        else if (!strcmp(key, "shared-connection-per-node"))
             g_config.shared_connection_per_node = atoi(val);
-        else if (!strcmp(key, "max_pipeline_inflight"))
+        else if (!strcmp(key, "max-pipeline-inflight"))
             g_config.max_pipeline_inflight = atoi(val);
-        else if (!strcmp(key, "transaction_replay_buffer_size"))
+        else if (!strcmp(key, "transaction-replay-buffer-size"))
             g_config.transaction_replay_buffer_size = atoi(val);
-        else if (!strcmp(key, "min_normal_connection"))
+        else if (!strcmp(key, "min-normal-connection"))
             g_pool_min[POOL_NORMAL] = atoi(val);
-        else if (!strcmp(key, "max_normal_connection"))
+        else if (!strcmp(key, "max-normal-connection"))
             g_pool_max[POOL_NORMAL] = atoi(val);
-        else if (!strcmp(key, "min_blocking_connection"))
+        else if (!strcmp(key, "min-blocking-connection"))
             g_pool_min[POOL_BLOCKING] = atoi(val);
-        else if (!strcmp(key, "max_blocking_connection"))
+        else if (!strcmp(key, "max-blocking-connection"))
             g_pool_max[POOL_BLOCKING] = atoi(val);
-        else if (!strcmp(key, "min_subscription_connection"))
+        else if (!strcmp(key, "min-subscription-connection"))
             g_pool_min[POOL_SUBSCRIPTION] = atoi(val);
-        else if (!strcmp(key, "max_subscription_connection"))
+        else if (!strcmp(key, "max-subscription-connection"))
             g_pool_max[POOL_SUBSCRIPTION] = atoi(val);
-        else if (!strcmp(key, "min_transaction_connection"))
+        else if (!strcmp(key, "min-transaction-connection"))
             g_pool_min[POOL_TRANSACTION] = atoi(val);
-        else if (!strcmp(key, "max_transaction_connection"))
+        else if (!strcmp(key, "max-transaction-connection"))
             g_pool_max[POOL_TRANSACTION] = atoi(val);
-        else if (!strcmp(key, "min_acl_connection"))
+        else if (!strcmp(key, "min-acl-connection"))
             g_pool_min[POOL_ACL] = atoi(val);
-        else if (!strcmp(key, "max_acl_connection"))
+        else if (!strcmp(key, "max-acl-connection"))
             g_pool_max[POOL_ACL] = atoi(val);
-        else if (!strcmp(key, "reported_version"))
-            set_reported(key, line, val, g_config.reported_version, sizeof(g_config.reported_version));
-        else if (!strcmp(key, "reported_role"))
-            set_reported(key, line, val, g_config.reported_role, sizeof(g_config.reported_role));
-        else if (!strcmp(key, "reported_modules"))
-            set_reported(key, line, val, g_config.reported_modules, sizeof(g_config.reported_modules));
+        else if (!strcmp(key, "reported-version"))
+            set_reported(key, p, val, g_config.reported_version, sizeof(g_config.reported_version));
+        else if (!strcmp(key, "reported-role"))
+            set_reported(key, p, val, g_config.reported_role, sizeof(g_config.reported_role));
+        else if (!strcmp(key, "reported-modules"))
+            set_reported(key, p, val, g_config.reported_modules, sizeof(g_config.reported_modules));
+        else {
+            fprintf(stderr, "%s:%d: unknown config option \"%s\"\n", path, lineno, key);
+            exit(1);
+        }
     }
     fclose(f);
 
+    /* The ports have no sensible default: a proxy listening on, or dialing,
+     * port 0 would come up looking healthy and serve nothing. */
+    if (!have_server_port || g_config.server_port < 1 || g_config.server_port > 65535) {
+        fprintf(stderr, "%s: server-port must be set to a port number between 1 and 65535\n", path);
+        exit(1);
+    }
+    if (!have_port || g_config.proxy_port < 1 || g_config.proxy_port > 65535) {
+        fprintf(stderr, "%s: port must be set to a port number between 1 and 65535\n", path);
+        exit(1);
+    }
+    if (g_config.max_multikey_payload <= 0) {
+        fprintf(stderr, "Warning: max-multikey-payload must be positive (got %d); falling back to default %d\n",
+                g_config.max_multikey_payload, DEFAULT_MAX_MULTIKEY_PAYLOAD);
+        g_config.max_multikey_payload = DEFAULT_MAX_MULTIKEY_PAYLOAD;
+    }
     if (g_config.max_connection <= 0) {
-        fprintf(stderr, "Warning: max_connection must be positive (got %d); falling back to default %d\n",
+        fprintf(stderr, "Warning: max-connection must be positive (got %d); falling back to default %d\n",
                 g_config.max_connection, DEFAULT_MAX_CONNECTIONS);
         g_config.max_connection = DEFAULT_MAX_CONNECTIONS;
     }
     /* 0 would make every backend connect time out at once, and as an
      * SO_RCVTIMEO it means no timeout at all. */
     if (g_config.backend_connect_timeout_ms <= 0) {
-        fprintf(stderr, "Warning: backend_connect_timeout_ms must be positive (got %d); falling back to default %d\n",
+        fprintf(stderr, "Warning: backend-connect-timeout-ms must be positive (got %d); falling back to default %d\n",
                 g_config.backend_connect_timeout_ms, DEFAULT_BACKEND_CONNECT_TIMEOUT_MS);
         g_config.backend_connect_timeout_ms = DEFAULT_BACKEND_CONNECT_TIMEOUT_MS;
     }
     if (g_config.shared_connection_per_node <= 0) {
-        fprintf(stderr, "Warning: shared_connection_per_node must be positive (got %d); falling back to default %d\n",
+        fprintf(stderr, "Warning: shared-connection-per-node must be positive (got %d); falling back to default %d\n",
                 g_config.shared_connection_per_node, DEFAULT_SHARED_CONNECTION_PER_NODE);
         g_config.shared_connection_per_node = DEFAULT_SHARED_CONNECTION_PER_NODE;
     }
     if (g_config.max_pipeline_inflight <= 0) {
-        fprintf(stderr, "Warning: max_pipeline_inflight must be positive (got %d); falling back to default %d\n",
+        fprintf(stderr, "Warning: max-pipeline-inflight must be positive (got %d); falling back to default %d\n",
                 g_config.max_pipeline_inflight, DEFAULT_MAX_PIPELINE_INFLIGHT);
         g_config.max_pipeline_inflight = DEFAULT_MAX_PIPELINE_INFLIGHT;
     }
     if (g_config.transaction_replay_buffer_size < 0) {
-        fprintf(stderr, "Warning: transaction_replay_buffer_size can't be negative (got %d); using 0 (no replay)\n",
+        fprintf(stderr, "Warning: transaction-replay-buffer-size can't be negative (got %d); using 0 (no replay)\n",
                 g_config.transaction_replay_buffer_size);
         g_config.transaction_replay_buffer_size = 0;
     }

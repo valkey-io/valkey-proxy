@@ -23,7 +23,7 @@
  * whatever the proxy's own slot map says later; a slot that has moved
  * meanwhile comes back as -MOVED, and a transaction without WATCH is then
  * replayed on the new node from the queued commands' bytes kept in txn_buf
- * (up to transaction_replay_buffer_size). With WATCH it can't be: the
+ * (up to transaction-replay-buffer-size). With WATCH it can't be: the
  * WATCH is gone with the old node, so EXEC answers nil and the client
  * retries, as it would after any WATCH abort.
  *

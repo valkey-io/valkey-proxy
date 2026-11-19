@@ -27,7 +27,7 @@
 #define MAX_NODES     64
 #define MAX_WORKERS   64
 #define PROXY_VERSION "0.1.0"
-/* Fallback for the "max_connection" proxy.conf setting (g_config.max_connection)
+/* Fallback for the "max-connection" proxy.conf setting (g_config.max_connection)
  * when the config file doesn't set it. This is the shared fd budget for the
  * whole process: client sockets + backend pool connections + listener(s). */
 #define DEFAULT_MAX_CONNECTIONS 4000
@@ -257,7 +257,7 @@ struct ClientConn {
     /* 1 = a non-multiplexed command is waiting (pushed back to qbuf) for
      * every multiplexed reply before it to be written out. */
     int mux_barrier;
-    /* 1 = input paused at max_pipeline_inflight or with too much reply
+    /* 1 = input paused at max-pipeline-inflight or with too much reply
      * output queued; resumed once the backlog drains. */
     int mux_throttled;
     /* 1 = the last read() of the socket hit EAGAIN, so nothing more is
@@ -333,7 +333,7 @@ struct ClientConn {
      * QUEUED, plus the one in flight from txn_cur_start on. */
     char *txn_buf;
     int txn_buf_len, txn_buf_cap, txn_cur_start;
-    int txn_replay_off;    /* txn_buf outgrew transaction_replay_buffer_size: no replay */
+    int txn_replay_off;    /* txn_buf outgrew transaction-replay-buffer-size: no replay */
     int txn_redirects;     /* replays done so far for this transaction */
     int txn_replay_expect; /* replies still owed to a replay in flight */
     int txn_replay_bad;    /* a replayed command came back with something but +QUEUED */
@@ -498,9 +498,9 @@ typedef struct {
     int max_multikey_payload;
     int max_connection;
     /* Multiplexing (see src/mux.c): single-key and fan-out commands share
-     * shared_connection_per_node connections per node instead of checking
+     * shared-connection-per-node connections per node instead of checking
      * one out per command, and a client may have up to
-     * max_pipeline_inflight of them in flight at once. */
+     * max-pipeline-inflight of them in flight at once. */
     int backend_multiplexing;
     int shared_connection_per_node;
     int max_pipeline_inflight;

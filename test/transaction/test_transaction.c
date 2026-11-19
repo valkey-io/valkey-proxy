@@ -280,7 +280,7 @@ void run_transaction_tests(const char *host, int port, int *pass, int *fail) {
     CHECK(strstr(raw, " flags=N ") && strstr(raw, " multi=-1 watch=0 "), "CLIENT INFO after EXEC: multi=-1 watch=0",
           pass, fail);
 
-    /* ── more transactions at once than max_transaction_connection: the
+    /* ── more transactions at once than max-transaction-connection: the
      * rest wait for a connection instead of failing ───────────────────── */
     {
 #define NTX 40
