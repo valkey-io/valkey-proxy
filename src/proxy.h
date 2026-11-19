@@ -55,6 +55,18 @@ typedef enum {
 extern const char *POOL_NAME[POOL_TYPE_COUNT];
 extern int g_pool_min[POOL_TYPE_COUNT];
 extern int g_pool_max[POOL_TYPE_COUNT];
+/* Bumped by PROXY CONFIG SET after it changes g_pool_min/g_pool_max; each
+ * worker compares it against Worker.pool_config_seen at the top of its
+ * event loop and resizes its own pools (see worker_apply_pool_config()). */
+extern atomic_int g_pool_config_version;
+/* g_pool_min/g_pool_max are written at runtime by PROXY CONFIG SET on one
+ * worker and read by every other one. */
+static inline int pool_min_load(int type) {
+    return __atomic_load_n(&g_pool_min[type], __ATOMIC_RELAXED);
+}
+static inline int pool_max_load(int type) {
+    return __atomic_load_n(&g_pool_max[type], __ATOMIC_RELAXED);
+}
 
 /* ── client / command enums ─────────────────────────────────────────── */
 typedef enum {
@@ -210,7 +222,10 @@ typedef struct {
 struct ConnPool {
     PoolType type;
     PoolConn *conns;
-    int count, max;
+    /* cap: how many PoolConn p->conns has room for. max can drop below it
+     * at runtime (PROXY CONFIG SET); raising max past cap grows p->conns at
+     * a worker safe point (see worker_apply_pool_config() in pool.c). */
+    int count, max, cap;
     int in_use; /* conns in CONN_IN_USE, kept exact by conn_set_state() */
     int node_idx, db;
     EventLoop *el;
@@ -439,6 +454,8 @@ typedef struct {
     uint8_t *fd_mask;
     TopoSnapshot topo;
     int topology_version_seen;
+    /* g_pool_config_version as of the last worker_apply_pool_config(). */
+    int pool_config_seen;
     /* Self-pipe: read end sits in this worker's own event loop like any
      * other fd, write end is used by the topology refresh thread (see
      * reconcile_and_publish()/wake_all_workers() in cluster.c) to kick this
@@ -522,6 +539,12 @@ typedef struct {
     char reported_version[32];
     char reported_role[16];
     char reported_modules[448];
+    /* Who may run PROXY CONFIG (see src/proxy_config.c): comma-separated
+     * ACL user names, from every proxy-config-admin-users /
+     * proxy-config-readonly-users line. Admin users may run every
+     * subcommand, read-only users GET and HELP. Empty = nobody. */
+    char proxy_config_admin_users[1024];
+    char proxy_config_readonly_users[1024];
 } Config;
 
 /* ── globals ────────────────────────────────────────────────────────── */
@@ -602,7 +625,12 @@ static inline uint64_t mono_us(void) {
 /* ── cluster ────────────────────────────────────────────────────────── */
 void fetch_cluster_nodes(void);
 int key_slot(const char *key, int klen);
+/* Starts the periodic topology refresh thread, once, if
+ * cluster-refresh-interval-ms is positive. Safe to call again later (PROXY
+ * CONFIG SET turning refresh on): only the first successful call starts it. */
 void topology_start_refresh_thread(void);
+/* Nudges every worker out of el_poll() (see cluster.c). */
+void wake_all_workers(void);
 static inline int topology_version_load(void) {
     return atomic_load_explicit(&g_topology_version, memory_order_acquire);
 }
@@ -662,6 +690,10 @@ void pool_enqueue_waiter(ConnPool *p, ClientConn *client);
 void pool_remove_waiter(ConnPool *p, ClientConn *client);
 void pool_release(Worker *w, PoolConn *c);
 void pool_destroy_conn(Worker *w, PoolConn *c);
+/* Brings this worker's pools in line with g_pool_min/g_pool_max after PROXY
+ * CONFIG SET changed them. Worker thread only, at the top of its event loop,
+ * where no PoolConn pointer is held on the stack. */
+void worker_apply_pool_config(Worker *w);
 DbGroup *db_group_get(Worker *w, int db);
 void worker_sync_topology(Worker *w);
 
@@ -811,12 +843,19 @@ void client_list_stop(Worker *w);
 
 /* ── proxy-local commands (see src/metrics.c) ───────────────────────── */
 void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen);
+/* PROXY CONFIG GET|SET|SAVE|HELP (see src/proxy_config.c). */
+void handle_proxy_config_cmd(Worker *w, ClientConn *client);
+/* Records the settable parameters' startup values, which PROXY CONFIG SAVE
+ * compares against. Call once, right after parse_conf(). */
+void proxy_config_init(void);
 /* Appends the "# Pools" section that PROXY POOLS returns. 0 on success,
  * -1 on allocation failure. */
 int proxy_pools_append(Worker *w, GrowBuf *g);
 
 /* ── INFO (see src/info.c) ──────────────────────────────────────────── */
 void info_init(const char *argv0, const char *conf_path);
+/* Absolute path of the config file the proxy was started with. */
+const char *info_config_file(void);
 char *wrap_text_reply(int resp3, const char *text, int len, int *out_len);
 /* A module the backends have loaded, as HELLO reports it. */
 #define MAX_BACKEND_MODULES 32

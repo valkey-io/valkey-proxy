@@ -20,6 +20,38 @@ static void set_reported(const char *key, const char *line, const char *val, cha
     snprintf(dst, cap, "%.*s", (int)(cap - 1), val);
 }
 
+/* For proxy-config-admin-users / proxy-config-readonly-users: appends val's
+ * comma-separated user names to the list in dst, so the setting can be
+ * split over several lines. Any mistake is fatal, since it decides who may
+ * reconfigure the proxy. */
+static void add_users(const char *path, int lineno, const char *key, const char *line, const char *val, char *dst,
+                      size_t cap) {
+    char extra[2];
+    if (sscanf(line, "%*s %*s %1s", extra) == 1) {
+        fprintf(stderr, "%s:%d: %s takes a comma-separated list of users without spaces\n", path, lineno, key);
+        exit(1);
+    }
+    for (const char *p = val;;) {
+        const char *e = strchr(p, ',');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == 0) {
+            fprintf(stderr, "%s:%d: %s has an empty user name\n", path, lineno, key);
+            exit(1);
+        }
+        if (n == 7 && !strncmp(p, "default", 7))
+            fprintf(stderr, "Warning: %s lists \"default\", which never has PROXY CONFIG access\n", key);
+        if (!e) break;
+        p = e + 1;
+    }
+    size_t used = strlen(dst);
+    if (used + (used ? 1 : 0) + strlen(val) >= cap) {
+        fprintf(stderr, "%s:%d: %s lists more than %zu characters of user names\n", path, lineno, key, cap - 1);
+        exit(1);
+    }
+    if (used) dst[used++] = ',';
+    memcpy(dst + used, val, strlen(val) + 1);
+}
+
 void parse_conf(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -116,6 +148,12 @@ void parse_conf(const char *path) {
             g_pool_min[POOL_ACL] = atoi(val);
         else if (!strcmp(key, "max-acl-connection"))
             g_pool_max[POOL_ACL] = atoi(val);
+        else if (!strcmp(key, "proxy-config-admin-users"))
+            add_users(path, lineno, key, p, val, g_config.proxy_config_admin_users,
+                      sizeof(g_config.proxy_config_admin_users));
+        else if (!strcmp(key, "proxy-config-readonly-users"))
+            add_users(path, lineno, key, p, val, g_config.proxy_config_readonly_users,
+                      sizeof(g_config.proxy_config_readonly_users));
         else if (!strcmp(key, "reported-version"))
             set_reported(key, p, val, g_config.reported_version, sizeof(g_config.reported_version));
         else if (!strcmp(key, "reported-role"))

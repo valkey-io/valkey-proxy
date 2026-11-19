@@ -124,7 +124,10 @@ EOF
 
 start_proxies() {
     mkdir -p "$CI_DIR"
-    start_proxy "$PROXY_PORT" ""
+    # The users run-test --cluster creates (test/acl/acl_fixture.c), for the
+    # PROXY CONFIG suite.
+    start_proxy "$PROXY_PORT" "proxy-config-admin-users     tc-proxy-acl
+proxy-config-readonly-users  tc-proxy-acl-ro"
     start_proxy "$REPORTED_PORT" "reported-version  8.0.2
 reported-role     replica
 reported-modules  search:10002,json"

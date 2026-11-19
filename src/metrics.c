@@ -2,7 +2,8 @@
 
 /* ── PROXY command ──────────────────────────────────────────────────────
  * Proxy introspection. PROXY POOLS is answered locally; PROXY INFO relays
- * each shard's own INFO (see info.c).
+ * each shard's own INFO (see info.c); PROXY CONFIG reads and changes the
+ * proxy's own settings (see proxy_config.c).
  *
  * PROXY POOLS reports connection pool usage per backend node and pool type,
  * summed across worker threads. The reply is a bulk string in the same
@@ -209,6 +210,10 @@ void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen) {
         handle_proxy_info_cmd(w, client, cmdlen);
         return;
     }
+    if (sublen == 6 && !strncasecmp(sub, "CONFIG", 6)) {
+        handle_proxy_config_cmd(w, client);
+        return;
+    }
     if (sublen == 4 && !strncasecmp(sub, "HELP", 4)) {
         static const char *lines[] = {
             "PROXY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -218,6 +223,15 @@ void handle_proxy_cmd(Worker *w, ClientConn *client, int cmdlen) {
             "INFO [<section> ...] [SHARD <index>|<ip:port>]",
             "    Return each shard's own INFO reply, labelled <index>:<ip>:<port>,",
             "    without merging. SHARD limits the reply to one shard.",
+            "CONFIG GET <pattern> [<pattern> ...]",
+            "    Return the proxy's own proxy.conf settings matching any of the glob-style",
+            "    patterns.",
+            "CONFIG SET <parameter> <value> [<parameter> <value> ...]",
+            "    Change proxy settings at runtime. PROXY CONFIG HELP lists the settable ones.",
+            "CONFIG SAVE [<file>]",
+            "    Write the current settings back to the startup config file, or to <file>.",
+            "CONFIG HELP",
+            "    Print PROXY CONFIG's own help.",
             "HELP",
             "    Print this help.",
         };

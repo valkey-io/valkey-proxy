@@ -8,6 +8,7 @@
  * parse_conf(): that pool is always exactly that size. */
 int g_pool_min[POOL_TYPE_COUNT] = {2, 2, 0, 0, 0, 4};
 int g_pool_max[POOL_TYPE_COUNT] = {20, 10, 10, 10, 10, 4};
+atomic_int g_pool_config_version;
 
 Config g_config;
 ClusterNode g_nodes[MAX_NODES];
@@ -305,6 +306,9 @@ static void *worker_thread(void *arg) {
      * sees a newer g_topology_version. */
     worker_sync_topology(w);
 
+    /* Read before db_group_get() builds any pool, so a PROXY CONFIG SET on
+     * another worker from here on is picked up by the check below. */
+    w->pool_config_seen = atomic_load_explicit(&g_pool_config_version, memory_order_acquire);
     db_group_get(w, g_config.db);
     atomic_store_explicit(&w->handoff_ready, 1, memory_order_release);
 
@@ -314,6 +318,11 @@ static void *worker_thread(void *arg) {
         int n = el_poll(w->el, w->input_ready_len ? 0 : -1);
         if (n < 0) break;
         if (w->topology_version_seen != topology_version_load()) worker_sync_topology(w);
+        /* After the topology sync, so pools refilled to the new minimum
+         * dial the current addresses. Like the sync, this is a safe point:
+         * no PoolConn pointer is held across it (see pool_grow()). */
+        if (w->pool_config_seen != atomic_load_explicit(&g_pool_config_version, memory_order_acquire))
+            worker_apply_pool_config(w);
         for (int i = 0; i < n; i++) {
             int fd = w->el->fired[i].fd;
             int mask = w->el->fired[i].mask;
@@ -369,6 +378,7 @@ int main(int argc, char **argv) {
 
     parse_conf(conf_path);
     info_init(argv[0], conf_path);
+    proxy_config_init();
     adjust_open_files_limit();
 
     memset(g_slot_map, -1, sizeof(g_slot_map));

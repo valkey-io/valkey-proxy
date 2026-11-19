@@ -388,7 +388,7 @@ static int owner_idx_seeded = 0;
  * whose wake_w isn't ready yet (still starting up) or whose pipe is
  * momentarily full (a wake is already pending for it) is simply skipped --
  * either way it will still pick up the new topology, just not instantly. */
-static void wake_all_workers(void) {
+void wake_all_workers(void) {
     int nw = g_config.worker_thread_no; /* clamped to [1, MAX_WORKERS] by parse_conf() */
     for (int i = 0; i < nw; i++) {
         int fd = g_workers[i].wake_w;
@@ -561,15 +561,20 @@ static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const
 
 static void *topology_refresh_loop(void *arg) {
     (void)arg;
-    int interval_ms = g_config.cluster_refresh_interval_ms;
     char last_ip[sizeof(g_config.server_ip)];
     snprintf(last_ip, sizeof(last_ip), "%s", g_config.server_ip);
     int last_port = g_config.server_port;
     for (;;) {
+        /* Re-read every cycle: PROXY CONFIG SET may change it, and 0 pauses
+         * refresh (checked again every second) without stopping the thread. */
+        int interval_ms = __atomic_load_n(&g_config.cluster_refresh_interval_ms, __ATOMIC_RELAXED);
+        int paused = interval_ms <= 0;
+        if (paused) interval_ms = 1000;
         struct timespec ts;
         ts.tv_sec = interval_ms / 1000;
         ts.tv_nsec = (long)(interval_ms % 1000) * 1000000L;
         nanosleep(&ts, NULL);
+        if (paused) continue;
 
         ClusterNode dn[MAX_NODES];
         int dcount = 0, dslot[CLUSTER_SLOTS];
@@ -611,10 +616,13 @@ static void *topology_refresh_loop(void *arg) {
 }
 
 void topology_start_refresh_thread(void) {
-    if (g_config.cluster_refresh_interval_ms <= 0) return;
+    static atomic_int started;
+    if (__atomic_load_n(&g_config.cluster_refresh_interval_ms, __ATOMIC_RELAXED) <= 0) return;
+    if (atomic_exchange(&started, 1)) return;
     pthread_t tid;
     if (pthread_create(&tid, NULL, topology_refresh_loop, NULL) != 0) {
         perror("pthread_create(topology_refresh_loop)");
+        atomic_store(&started, 0);
         return;
     }
     pthread_detach(tid);

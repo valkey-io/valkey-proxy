@@ -20,6 +20,7 @@ void run_json_tests(const char *host, int port, int *pass, int *fail);
 void run_pubsub_tests(const char *host, int port, int *pass, int *fail);
 void run_transaction_tests(const char *host, int port, int *pass, int *fail);
 void run_acl_tests(const char *host, int port, int *pass, int *fail);
+void run_proxy_config_tests(const char *host, int port, int *pass, int *fail);
 void run_resp3_tests(const char *host, int port, int *pass, int *fail);
 void run_search_tests(const char *host, int port, int *pass, int *fail);
 void run_reported_tests(const char *host, int port, int *pass, int *fail);
@@ -29,8 +30,8 @@ extern const char *g_test_acl_user;
 
 static void usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s [--bloomfilter] [--json] [--search] [--string] [--pubsub] [--transaction] [-h=<host>] [-p=<port>] "
-            "[--cluster=<host:port>] [--reported=<host:port>]\n",
+            "Usage: %s [--bloomfilter] [--json] [--search] [--string] [--pubsub] [--transaction] [--proxy-config] "
+            "[-h=<host>] [-p=<port>] [--cluster=<host:port>] [--reported=<host:port>]\n",
             prog);
     fprintf(stderr, "  -h=<host>      proxy IP address (default: 127.0.0.1)\n");
     fprintf(stderr, "  -p=<port>      proxy port      (default: 7777)\n");
@@ -46,6 +47,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --string       run String tests only\n");
     fprintf(stderr, "  --pubsub       run Pub/Sub tests only\n");
     fprintf(stderr, "  --transaction  run transaction (MULTI / EXEC / WATCH) tests only\n");
+    fprintf(stderr, "  --proxy-config run PROXY CONFIG (GET / SET / SAVE / HELP) tests only\n");
     fprintf(stderr, "  (any of the suite options above runs only the selected suites, not the defaults)\n");
 }
 
@@ -58,6 +60,7 @@ int main(int argc, char *argv[]) {
     int run_string = 0;
     int run_pubsub = 0;
     int run_transaction = 0;
+    int run_proxy_config = 0;
     int run_defaults = 1;
     char cluster_seed[128] = "";
     char reported_host[64] = "";
@@ -98,6 +101,11 @@ int main(int argc, char *argv[]) {
             run_defaults = 0;
             continue;
         }
+        if (strcmp(argv[i], "--proxy-config") == 0) {
+            run_proxy_config = 1;
+            run_defaults = 0;
+            continue;
+        }
         fprintf(stderr, "Unknown argument: %s\n", argv[i]);
         usage(argv[0]);
         return 1;
@@ -124,6 +132,7 @@ int main(int argc, char *argv[]) {
         RUN_SUITE("hash", run_hash_tests);
         RUN_SUITE("string", run_string_tests);
         RUN_SUITE("general", run_general_tests);
+        RUN_SUITE("proxy_config", run_proxy_config_tests);
         RUN_SUITE("script", run_script_tests);
         RUN_SUITE("function", run_function_tests);
         RUN_SUITE("geospatial", run_geospatial_tests);
@@ -173,6 +182,10 @@ int main(int argc, char *argv[]) {
 
     if (run_transaction) {
         RUN_SUITE("transaction", run_transaction_tests);
+    }
+
+    if (run_proxy_config) {
+        RUN_SUITE("proxy_config", run_proxy_config_tests);
     }
 
     if (g_test_acl_user) test_acl_fixture_teardown();

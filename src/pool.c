@@ -87,6 +87,7 @@ static void pool_fill_to(Worker *w, ConnPool *p, int want) {
     if (!p->conns) {
         p->conns = calloc((size_t)p->max, sizeof(PoolConn));
         if (!p->conns) return;
+        p->cap = p->max;
     }
     const ClusterNode *node = &w->topo.nodes[p->node_idx];
     while (p->count < want && p->count < p->max) {
@@ -145,7 +146,8 @@ static void pool_fill_to(Worker *w, ConnPool *p, int want) {
 
 void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db) {
     p->type = type;
-    p->max = g_pool_max[type];
+    p->max = pool_max_load(type);
+    p->cap = 0;
     p->count = 0;
     p->in_use = 0;
     p->conns = NULL;
@@ -164,7 +166,7 @@ void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db) {
         return;
     }
     atomic_store_explicit(&p->stats.live, 1, memory_order_release);
-    int want = g_pool_min[type];
+    int want = pool_min_load(type);
     if (want == 0) {
         printf("      %-14s pool:  0/%d (on-demand)\n", POOL_NAME[type], p->max);
         return;
@@ -189,6 +191,7 @@ PoolConn *pool_acquire_nb(Worker *w, ConnPool *p) {
         if (!p->conns) {
             p->conns = calloc((size_t)p->max, sizeof(PoolConn));
             if (!p->conns) return NULL;
+            p->cap = p->max;
         }
         int fd = pool_new_fd(w, p);
         if (fd >= 0) {
@@ -349,6 +352,10 @@ void pool_release(Worker *w, PoolConn *c) {
         pool_stats_handoff(p, next);
         pool_stats_publish(p);
         resume_client_after_conn(w, next, c);
+    } else if (p->count > p->max && p->type != POOL_SHARED && !c->txn_client) {
+        /* PROXY CONFIG SET lowered max-*-connection below what's open:
+         * shrink as connections come back instead of keeping them idle. */
+        pool_destroy_conn(w, c);
     } else {
         conn_set_state(p, c, CONN_AVAILABLE);
         c->waiting_client = NULL;
@@ -598,7 +605,7 @@ void worker_sync_topology(Worker *w) {
                      * (scenario 3) finish without a client-visible gap. Skip
                      * it when the index no longer owns any slot at all
                      * (scenario 2): there is nothing live to reconnect to. */
-                    if (still_owns_slots) pool_fill_to(w, p, g_pool_min[pt]);
+                    if (still_owns_slots) pool_fill_to(w, p, pool_min_load(pt));
                     /* Scenario 2: this node is gone for good and nothing will
                      * ever call pool_release()/pool_fill_to() on this pool
                      * again, so anyone already parked in wait_queue (e.g. a
@@ -613,4 +620,88 @@ void worker_sync_topology(Worker *w) {
         }
     }
     w->topology_version_seen = w->topo.version;
+}
+
+/* ── runtime pool resize (PROXY CONFIG SET) ─────────────────────────── */
+static void relocate_conn_ptr(PoolConn **pp, uintptr_t old_lo, uintptr_t old_hi, PoolConn *nw) {
+    uintptr_t a = (uintptr_t)*pp;
+    if (*pp && a >= old_lo && a < old_hi) *pp = nw + (a - old_lo) / sizeof(PoolConn);
+}
+
+/* Moves p->conns to a new array of ncap entries and repoints everything that
+ * holds a PoolConn pointer into it -- the same owners pool_destroy_conn()
+ * fixes up when it moves one entry, plus backend_map. Only safe where no
+ * caller further up the stack holds such a pointer: worker_apply_pool_config()
+ * runs at the top of the worker's event loop for exactly that reason.
+ * Returns 0 on success, -1 (pool untouched) on allocation failure. */
+static int pool_grow(Worker *w, ConnPool *p, int ncap) {
+    PoolConn *old = p->conns;
+    PoolConn *nw = calloc((size_t)ncap, sizeof(PoolConn));
+    if (!nw) return -1;
+    memcpy(nw, old, (size_t)p->cap * sizeof(PoolConn));
+    uintptr_t lo = (uintptr_t)old, hi = (uintptr_t)(old + p->cap);
+
+    for (int i = 0; i < p->count; i++) {
+        PoolConn *c = &nw[i];
+        if (c->fd >= 0 && c->fd < g_config.max_connection && w->backend_map[c->fd] == &old[i])
+            w->backend_map[c->fd] = c;
+        if (c->fanout_sub) c->fanout_sub->conn = c;
+    }
+    /* Every client of this worker, not just the ones the conns point back
+     * to: an ACL client keeps acl_conns[] (and txn_conn) across requests. */
+    for (int fd = 0; fd < g_config.max_connection; fd++) {
+        ClientConn *cl = w->client_map[fd];
+        if (!cl) continue;
+        relocate_conn_ptr(&cl->pending_conn, lo, hi, nw);
+        relocate_conn_ptr(&cl->sub_conn, lo, hi, nw);
+        relocate_conn_ptr(&cl->hello_auth_conn, lo, hi, nw);
+        relocate_conn_ptr(&cl->txn_conn, lo, hi, nw);
+        for (int ni = 0; ni < MAX_NODES; ni++) relocate_conn_ptr(&cl->acl_conns[ni], lo, hi, nw);
+    }
+    p->conns = nw;
+    p->cap = ncap;
+    free(old);
+    return 0;
+}
+
+/* Closes idle connections past p->max. Walks down from the top so the entry
+ * pool_destroy_conn() moves into a freed slot has already been looked at. */
+static void pool_trim_idle(Worker *w, ConnPool *p) {
+    for (int i = p->count - 1; i >= 0 && p->count > p->max; i--) {
+        PoolConn *c = &p->conns[i];
+        if (c->state == CONN_AVAILABLE && !c->waiting_client && !c->txn_client && !c->fanout_sub)
+            pool_destroy_conn(w, c);
+    }
+}
+
+void worker_apply_pool_config(Worker *w) {
+    int ver = atomic_load_explicit(&g_pool_config_version, memory_order_acquire);
+    for (int gi = 0; gi < w->db_group_count; gi++) {
+        NodePools *nps = w->db_groups[gi].node_pools;
+        for (int ni = 0; ni < MAX_NODES; ni++) {
+            NodePools *np = &nps[ni];
+            if (np->gen < 0) continue;
+            int owns = ni < w->topo.node_count && w->topo.node_has_slots[ni];
+            for (int pt = 0; pt < POOL_TYPE_COUNT; pt++) {
+                if (pt == POOL_SHARED) continue;
+                ConnPool *p = &np->pools[pt];
+                if (!atomic_load_explicit(&p->stats.live, memory_order_relaxed)) continue;
+                int nmax = pool_max_load(pt), nmin = pool_min_load(pt);
+                if (p->conns && nmax > p->cap && pool_grow(w, p, nmax) < 0) {
+                    fprintf(stderr, "[worker %d] [pool:%s] can't grow to max=%d (out of memory); keeping %d\n",
+                            w->thread_id, POOL_NAME[pt], nmax, p->cap);
+                    nmax = p->cap;
+                }
+                p->max = nmax;
+                pool_trim_idle(w, p);
+                if (!owns) continue;
+                pool_fill_to(w, p, nmin);
+                /* Clients parked for want of a connection get the new room
+                 * now rather than whenever someone releases one. */
+                if (p->wait_len > 0) pool_fill_to(w, p, p->count + p->wait_len);
+                pool_stats_publish(p);
+            }
+        }
+    }
+    w->pool_config_seen = ver;
 }

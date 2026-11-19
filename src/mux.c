@@ -66,13 +66,14 @@ static int mux_conn_connect(Worker *w, PoolConn *c) {
 }
 
 void mux_pool_init(Worker *w, ConnPool *p) {
-    p->max = g_pool_max[POOL_SHARED];
+    p->max = pool_max_load(POOL_SHARED);
     if (p->max <= 0) return; /* multiplexing off */
     p->conns = calloc((size_t)p->max, sizeof(PoolConn));
     if (!p->conns) {
         p->max = 0;
         return;
     }
+    p->cap = p->max;
     /* Every slot exists from the start, connected or not, so slot % count
      * always names the same connection. */
     p->count = p->max;
