@@ -502,7 +502,7 @@ These commands require the Search module (valkey-search) to be loaded on every b
 | `ACL SETUSER` | |
 | `BGREWRITEAOF` | |
 | `BGSAVE` | |
-| `CONFIG GET` | |
+| `CONFIG GET` | `valkey-benchmark` sends `CONFIG GET save` and `CONFIG GET appendonly` before it starts. Through the proxy it prints `WARNING: Could not fetch server CONFIG` and leaves the `host configuration` lines out of its report. This is expected and doesn't affect the results |
 | `CONFIG HELP` | |
 | `CONFIG RESETSTAT` | |
 | `CONFIG REWRITE` | |
