@@ -498,6 +498,8 @@ static const char *ACL_CAT_PUBSUB[] = {
     NULL};
 
 static const char *ACL_CAT_ADMIN[] = {
+    "hotkeys|get",
+    "hotkeys|reset",
     "module|list",
     "slowlog|get",
     "slowlog|len",
@@ -728,6 +730,9 @@ static const char *ACL_CAT_SLOW[] = {
     "blpop",
     "hgetall",
     "lpos",
+    "hotkeys|get",
+    "hotkeys|help",
+    "hotkeys|reset",
     "lrange",
     "ssubscribe",
     "zrevrangebylex",
@@ -848,6 +853,8 @@ static const char *ACL_CAT_BLOCKING[] = {
     NULL};
 
 static const char *ACL_CAT_DANGEROUS[] = {
+    "hotkeys|get",
+    "hotkeys|reset",
     "restore",
     "module|list",
     "slowlog|get",

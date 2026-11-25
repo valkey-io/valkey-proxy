@@ -466,6 +466,121 @@ static char *fanout_agg_slowlog_get(FanoutCtx *ctx, int *out_len) {
     return out;
 }
 
+/* HOTKEYS GET: each node's reply is an array of entries ordered by qps
+ * descending, each entry a key/db/qps map (a flat *6 by now, since sub->rbuf
+ * is always RESP2). The entries of every node are merged by qps (highest
+ * first, ties kept in node order) and all of them are returned: each node
+ * already capped its own list at its hotkeys-top-k, which the proxy doesn't
+ * know, so truncating could drop a node's keys. For a RESP3 client each
+ * entry's *6 header is re-encoded as %3.
+ *
+ * Known limitation: while a slot migrates, the same key can be counted on
+ * both nodes and then shows up twice. */
+typedef struct {
+    const char *p; /* entry, from just after its "*6\r\n" header */
+    int len;
+    long long qps;
+    int pairs; /* field/value pairs in the entry */
+    int sub, pos;
+} HotkeyEntry;
+
+static int hotkey_entry_cmp(const void *a, const void *b) {
+    const HotkeyEntry *x = a, *y = b;
+    if (x->qps != y->qps) return x->qps > y->qps ? -1 : 1;
+    if (x->sub != y->sub) return x->sub - y->sub;
+    return x->pos - y->pos;
+}
+
+/* Value of the "qps" field of one *2n field/value entry starting at p, with
+ * *body_off set to the offset just past the entry's header and *pairs to n.
+ * -1 if p isn't a flat field/value array. */
+static long long hotkey_entry_qps(const char *p, int len, int *body_off, int *pairs) {
+    if (len < 4 || p[0] != '*') return -1;
+    int n = atoi(p + 1);
+    const char *nl = memchr(p, '\n', (size_t)len);
+    if (!nl || n < 2 || n % 2) return -1;
+    int off = (int)(nl - p) + 1;
+    *body_off = off;
+    *pairs = n / 2;
+    long long qps = 0;
+    for (int i = 0; i < n; i += 2) {
+        int fl = resp_response_len(p + off, len - off);
+        if (fl <= 0) return -1;
+        int is_qps = fl == 9 && !memcmp(p + off, "$3\r\nqps\r\n", 9);
+        off += fl;
+        int vl = resp_response_len(p + off, len - off);
+        if (vl <= 0) return -1;
+        if (is_qps && p[off] == ':') qps = atoll(p + off + 1);
+        off += vl;
+    }
+    return qps;
+}
+
+static char *fanout_agg_hotkeys_get(FanoutCtx *ctx, int *out_len) {
+    int resp3 = ctx->client->resp == 3;
+    int total = 0;
+    for (int i = 0; i < ctx->nsubs; i++) {
+        FanoutSub *s = &ctx->subs[i];
+        if (s->error || !s->rbuf || s->rbuf_len < 1) continue;
+        if (s->rbuf[0] == '-') {
+            /* e.g. wrong arity, NOPERM or a backend without HOTKEYS --
+             * relay the backend's error verbatim */
+            char *r = malloc((size_t)s->rbuf_len);
+            if (!r) return NULL;
+            memcpy(r, s->rbuf, (size_t)s->rbuf_len);
+            *out_len = s->rbuf_len;
+            return r;
+        }
+        if (s->rbuf[0] == '*' && atoi(s->rbuf + 1) > 0) total += atoi(s->rbuf + 1);
+    }
+
+    HotkeyEntry *ents = malloc(sizeof(HotkeyEntry) * (size_t)(total > 0 ? total : 1));
+    if (!ents) return NULL;
+    int n = 0, data = 0;
+    for (int i = 0; i < ctx->nsubs; i++) {
+        FanoutSub *s = &ctx->subs[i];
+        if (s->error || !s->rbuf || s->rbuf_len < 1 || s->rbuf[0] != '*') continue;
+        int cnt = atoi(s->rbuf + 1);
+        const char *nl = memchr(s->rbuf, '\n', (size_t)s->rbuf_len);
+        if (cnt <= 0 || !nl) continue;
+        int off = (int)(nl - s->rbuf) + 1;
+        for (int j = 0; j < cnt && n < total; j++) {
+            int el = resp_response_len(s->rbuf + off, s->rbuf_len - off);
+            if (el <= 0) break;
+            int body = 0, pairs = 0;
+            long long qps = hotkey_entry_qps(s->rbuf + off, el, &body, &pairs);
+            if (qps >= 0) {
+                ents[n].p = s->rbuf + off + body;
+                ents[n].len = el - body;
+                ents[n].qps = qps;
+                ents[n].pairs = pairs;
+                ents[n].sub = i;
+                ents[n].pos = j;
+                data += ents[n].len + 16; /* + the entry's own header */
+                n++;
+            }
+            off += el;
+        }
+    }
+    qsort(ents, (size_t)n, sizeof(HotkeyEntry), hotkey_entry_cmp);
+
+    char *out = malloc((size_t)(32 + data));
+    if (!out) {
+        free(ents);
+        return NULL;
+    }
+    int o = snprintf(out, 32, "*%d\r\n", n);
+    for (int i = 0; i < n; i++) {
+        int pairs = ents[i].pairs;
+        o += snprintf(out + o, 16, resp3 ? "%%%d\r\n" : "*%d\r\n", resp3 ? pairs : pairs * 2);
+        memcpy(out + o, ents[i].p, (size_t)ents[i].len);
+        o += ents[i].len;
+    }
+    free(ents);
+    *out_len = o;
+    return out;
+}
+
 static char *fanout_agg_mget(FanoutCtx *ctx, int *out_len) {
     int total = ctx->total_keys;
     char hdr[32];
@@ -1352,6 +1467,8 @@ void fanout_aggregate_and_reply(Worker *w, FanoutCtx *ctx) {
         resp = fanout_agg_sum(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "SLOWLOG_GET") || !strcmp(ctx->cmd, "COMMANDLOG_GET")) {
         resp = fanout_agg_slowlog_get(ctx, &resp_len);
+    } else if (!strcmp(ctx->cmd, "HOTKEYS_GET")) {
+        resp = fanout_agg_hotkeys_get(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "RESET")) {
         resp = fanout_agg_ok(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "CHANNELS")) {
@@ -2472,6 +2589,85 @@ void handle_slowlog_cmd(Worker *w, ClientConn *client, int cmdlen) {
     }
 
     client_send_error(w, client, "unknown SLOWLOG subcommand");
+    client->hbuf_len = 0;
+}
+
+/* HOTKEYS HELP goes to one master; GET and RESET to every master, since each
+ * node tracks the keys of its own slots. See fanout_agg_hotkeys_get(). */
+void handle_hotkeys_cmd(Worker *w, ClientConn *client, int cmdlen) {
+    const char *sub;
+    int sublen;
+    if (!resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen)) {
+        client_send_error(w, client, "missing HOTKEYS subcommand");
+        client->hbuf_len = 0;
+        return;
+    }
+    char subcmd[32];
+    int sclen = sublen < 31 ? sublen : 31;
+    memcpy(subcmd, sub, (size_t)sclen);
+    subcmd[sclen] = '\0';
+    for (int i = 0; subcmd[i]; i++) subcmd[i] = (char)toupper((unsigned char)subcmd[i]);
+
+    /* HOTKEYS HELP — route to a single master node, no fan-out */
+    if (!strcmp(subcmd, "HELP")) {
+        int ni = topo_first_master(w);
+        DbGroup *grp = db_group_get(w, client->db);
+        if (!grp) {
+            client_send_error(w, client, "db group error");
+            close_client(w, client);
+            return;
+        }
+        ConnPool *pool = &grp->node_pools[ni].pools[POOL_NORMAL];
+        PoolConn *conn = pool_acquire_nb(w, pool);
+        if (!conn) {
+            client->node_idx = ni;
+            client->state = CS_WAITING_CONN;
+            fd_unwatch(w, client->fd, EL_READABLE);
+            pool_enqueue_waiter(pool, client);
+            return;
+        }
+        conn->waiting_client = client;
+        client->pending_conn = conn;
+        resume_client_after_conn(w, client, conn);
+        return;
+    }
+
+    /* HOTKEYS GET — fan-out to all master nodes, merge by qps. The request
+     * is forwarded verbatim, so a node rejects extra arguments itself and
+     * its error is relayed as-is. */
+    if (!strcmp(subcmd, "GET")) {
+        FanoutCtx *ctx = calloc(1, sizeof(FanoutCtx));
+        if (!ctx) {
+            client_send_error(w, client, "out of memory");
+            close_client(w, client);
+            return;
+        }
+        ctx->client = client;
+        snprintf(ctx->cmd, sizeof(ctx->cmd), "HOTKEYS_GET");
+        client->fanout_ctx = ctx;
+
+        fanout_all_masters(w, client, ctx, client->hbuf, cmdlen);
+        return;
+    }
+
+    /* HOTKEYS RESET — fan-out to all master nodes, reply +OK if all succeed.
+     * Also forwarded verbatim, for the same arity check. */
+    if (!strcmp(subcmd, "RESET")) {
+        FanoutCtx *ctx = calloc(1, sizeof(FanoutCtx));
+        if (!ctx) {
+            client_send_error(w, client, "out of memory");
+            close_client(w, client);
+            return;
+        }
+        ctx->client = client;
+        snprintf(ctx->cmd, sizeof(ctx->cmd), "RESET");
+        client->fanout_ctx = ctx;
+
+        fanout_all_masters(w, client, ctx, client->hbuf, cmdlen);
+        return;
+    }
+
+    client_send_error(w, client, "unknown HOTKEYS subcommand");
     client->hbuf_len = 0;
 }
 
@@ -3664,6 +3860,10 @@ void handle_noslot_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdle
     }
     if (!strcmp(cmd, "COMMANDLOG")) {
         handle_commandlog_cmd(w, client, cmdlen);
+        return;
+    }
+    if (!strcmp(cmd, "HOTKEYS")) {
+        handle_hotkeys_cmd(w, client, cmdlen);
         return;
     }
     if (!strcmp(cmd, "MODULE")) {

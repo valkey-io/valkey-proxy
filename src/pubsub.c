@@ -102,7 +102,7 @@ static int is_sub_fence_reply(const char *buf, int len) {
 
 /* Appends "-ERR msg" to the client's output. Returns -1 out of memory. */
 static int client_append_error(ClientConn *cl, const char *msg) {
-    char buf[256];
+    char buf[sizeof(cl->sub_fence_error) + 16];
     int n = snprintf(buf, sizeof(buf), "-ERR %s\r\n", msg);
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
     if (cl->wbuf_cap < cl->wbuf_len + n) {
@@ -117,28 +117,88 @@ static int client_append_error(ClientConn *cl, const char *msg) {
     return 0;
 }
 
+/* Answers the current command (whole in hbuf, see need_whole in client.c)
+ * with "-ERR err" instead of running it. The error waits behind a fence like
+ * an unsubscribe's, so it comes after every reply sub_conn still owes. */
+static void sub_reject_after_fence(Worker *w, ClientConn *client, const char *err) {
+    client->hbuf_len = 0;
+    client->state = CS_READING_HDR;
+    if (!client->sub_conn) {
+        client_send_error(w, client, err);
+    } else if (sub_conn_send_fence(w, client->sub_conn) < 0) {
+        close_client(w, client);
+        return;
+    } else {
+        client->sub_fence_pending = 1;
+        snprintf(client->sub_fence_error, sizeof(client->sub_fence_error), "%s", err);
+    }
+    fd_watch(w, client->fd, EL_READABLE);
+}
+
+#define SUB_RESP2_ONLY_ALLOWED \
+    "only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+
 /* CLIENT LIST from a subscribed client. Valkey refuses it in RESP2; the
  * proxy refuses it in RESP3 too, since its own list can't be sent from
  * subscribe mode. Going to the backend instead would list the backend's
- * clients once the sub_conn speaks RESP3. The error waits behind a fence
- * like an unsubscribe's, so it comes after every reply sub_conn still owes. */
+ * clients once the sub_conn speaks RESP3. */
 void handle_subscribed_client_list(Worker *w, ClientConn *client) {
     const char *err = client->resp == 3 ? "CLIENT LIST is not supported while subscribed"
-                                        : "Can't execute 'client|list': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / "
-                                          "PING / QUIT / RESET are allowed in this context";
-    client->hbuf_len = 0;
-    if (!client->sub_conn) {
-        client_send_error(w, client, err);
-        return;
+                                        : "Can't execute 'client|list': " SUB_RESP2_ONLY_ALLOWED;
+    sub_reject_after_fence(w, client, err);
+}
+
+/* What a RESP2 subscriber may still run, as on Valkey (QUIT and RESET
+ * aren't supported by the proxy at all). */
+static const char *SUB_RESP2_ALLOWED_CMDS[] = {"SUBSCRIBE",    "PSUBSCRIBE",   "SSUBSCRIBE", "UNSUBSCRIBE",
+                                               "PUNSUBSCRIBE", "SUNSUBSCRIBE", "PING",       NULL};
+/* Commands Valkey names "<cmd>|<subcommand>" in that refusal. */
+static const char *SUB_CONTAINER_CMDS[] = {"ACL",      "CLIENT",  "CLUSTER", "COMMAND", "COMMANDLOG", "CONFIG",
+                                           "FUNCTION", "HOTKEYS", "LATENCY", "MEMORY",  "MODULE",     "OBJECT",
+                                           "PUBSUB",   "SCRIPT",  "SLOWLOG", "XGROUP",  "XINFO",      NULL};
+
+/* Valkey's refusal of cmd for a RESP2 subscriber, e.g. "Can't execute
+ * 'config|get': ...". Valkey would check the arity first; the proxy has no
+ * arity table, so a call with too few arguments gets this error instead. */
+static void sub_resp2_refusal(const ClientConn *client, int cmdlen, const char *cmd, char *out, int cap) {
+    char name[64 + 1 + 64 + 1]; /* cmd|subcommand */
+    int n = 0;
+    for (const char *p = cmd; *p && n < 64; p++) name[n++] = (char)tolower((unsigned char)*p);
+    const char *sub;
+    int sublen;
+    if (cmd_in_list(cmd, SUB_CONTAINER_CMDS) && resp_get_nth_arg(client->hbuf, cmdlen, 1, &sub, &sublen)) {
+        name[n++] = '|';
+        for (int i = 0; i < sublen && i < 64; i++) name[n++] = (char)tolower((unsigned char)sub[i]);
     }
-    if (sub_conn_send_fence(w, client->sub_conn) < 0) {
-        close_client(w, client);
-        return;
+    name[n] = '\0';
+    snprintf(out, (size_t)cap, "Can't execute '%s': " SUB_RESP2_ONLY_ALLOWED, name);
+}
+
+/* A RESP3 sub_conn answers PING like any other command (+PONG, or the
+ * argument as a bulk string); a RESP2 subscriber expects ["pong", arg]
+ * (arg "" without one), as a RESP2 sub_conn would send. Returns 1 and a
+ * malloc'd *out when reply is such a PING reply. */
+static int sub_ping_reply_to_resp2(const char *reply, int len, char **out, int *out_len) {
+    static const char HEAD[] = "*2\r\n$4\r\npong\r\n";
+    const int hl = (int)sizeof(HEAD) - 1;
+    const char *arg;
+    int arglen;
+    if (len == 7 && !memcmp(reply, "+PONG\r\n", 7)) {
+        arg = "$0\r\n\r\n";
+        arglen = 6;
+    } else if (reply[0] == '$') {
+        arg = reply;
+        arglen = len;
+    } else {
+        return 0;
     }
-    client->sub_fence_pending = 1;
-    client->sub_fence_error = err;
-    client->state = CS_READING_HDR;
-    fd_watch(w, client->fd, EL_READABLE);
+    char *buf = malloc((size_t)(hl + arglen));
+    if (!buf) return -1;
+    memcpy(buf, HEAD, (size_t)hl);
+    memcpy(buf + hl, arg, (size_t)arglen);
+    *out = buf;
+    *out_len = hl + arglen;
+    return 1;
 }
 
 void handle_sub_conn_readable(Worker *w, PoolConn *conn) {
@@ -192,9 +252,9 @@ void handle_sub_conn_readable(Worker *w, PoolConn *conn) {
         if (cl->sub_fence_pending && is_sub_fence_reply(conn->rbuf + off, rlen)) {
             off += rlen;
             cl->sub_fence_pending = 0;
-            if (cl->sub_fence_error) {
+            if (cl->sub_fence_error[0]) {
                 int rc = client_append_error(cl, cl->sub_fence_error);
-                cl->sub_fence_error = NULL;
+                cl->sub_fence_error[0] = '\0';
                 if (rc < 0) {
                     close_client(w, cl);
                     return;
@@ -241,16 +301,21 @@ void handle_sub_conn_readable(Worker *w, PoolConn *conn) {
          * marker alone rather than the message name, so it's correct
          * regardless of exactly which of these real Valkey does or doesn't
          * push-encode. A RESP3 subscriber (cl->resp==3) gets it straight
-         * through either way. */
+         * through either way.
+         * Anything else that isn't an error is the reply to a PING (the only
+         * other command a RESP2 subscriber can send, see handle_pubsub_cmd()),
+         * which a RESP3 sub_conn sends in its RESP3-client form. */
         const char *out = conn->rbuf + off;
         int out_len = rlen;
         char *downgraded = NULL;
-        if (conn->resp3 && cl->resp == 2 && conn->rbuf[off] == '>') {
-            if (resp3_downgrade_push(conn->rbuf + off, rlen, &downgraded, &out_len) < 0) {
+        if (conn->resp3 && cl->resp == 2 && conn->rbuf[off] != '-') {
+            int rc = conn->rbuf[off] == '>' ? resp3_downgrade_push(conn->rbuf + off, rlen, &downgraded, &out_len)
+                                            : sub_ping_reply_to_resp2(conn->rbuf + off, rlen, &downgraded, &out_len);
+            if (rc < 0) {
                 close_client(w, cl);
                 return;
             }
-            out = downgraded;
+            if (downgraded) out = downgraded;
         }
 
         if (cl->wbuf_cap < cl->wbuf_len + out_len) {
@@ -356,6 +421,17 @@ void handle_blocking_complete(Worker *w, ClientConn *client, const char *cmd) {
 }
 
 void handle_pubsub_cmd(Worker *w, ClientConn *client, int cmdlen, const char *cmd, const char *key, int keylen) {
+    /* Every command a subscribed client sends comes here (see
+     * route_command()). A RESP2 sub_conn would refuse the ones a RESP2
+     * subscriber may not run, but a RESP3 one runs them all, and the proxy
+     * upgrades sub_conns to RESP3 as soon as any client uses HELLO 3 -- so
+     * the refusal is made here, whichever the sub_conn speaks. */
+    if (client->resp == 2 && !cmd_in_list(cmd, SUB_RESP2_ALLOWED_CMDS)) {
+        char err[sizeof(client->sub_fence_error)];
+        sub_resp2_refusal(client, cmdlen, cmd, err, (int)sizeof(err));
+        sub_reject_after_fence(w, client, err);
+        return;
+    }
     if (!client->sub_conn) {
         int ni;
         if (!strcmp(cmd, "SSUBSCRIBE") || !strcmp(cmd, "SUNSUBSCRIBE")) {

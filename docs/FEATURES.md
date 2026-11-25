@@ -37,7 +37,7 @@ ID/GETNAME/SETNAME/INFO/HELP`, `SCRIPT HELP`, `FUNCTION HELP`, and the help-text
 ### 3.2 Single-node forward (pick one master, relay its reply verbatim)
 `RANDOMKEY` `LOLWUT` `FT._LIST` `FT.INFO` `FT.CREATE` `FT.DROPINDEX` `FT.SEARCH` `FT.AGGREGATE` `OBJECT HELP` `XGROUP HELP` `XINFO HELP`
 `SCRIPT EXISTS/SHOW` `FUNCTION LIST` `MODULE LIST` `COMMAND HELP/GETKEYS/GETKEYSANDFLAGS`
-`SLOWLOG HELP` `COMMANDLOG HELP` `PUBSUB HELP` `ACL LIST/USERS/WHOAMI/GETUSER/DRYRUN` (uses the
+`SLOWLOG HELP` `COMMANDLOG HELP` `HOTKEYS HELP` `PUBSUB HELP` `ACL LIST/USERS/WHOAMI/GETUSER/DRYRUN` (uses the
 shared connection while unauthenticated / authenticated as the default user; once a client has
 `AUTH`'d as a non-default user, it switches to that client's own dedicated authenticated
 connection — see §8)
@@ -58,7 +58,11 @@ merged), `PUBSUB NUMSUB`/`SHARDNUMSUB` (per-channel counts summed), `PUBSUB NUMP
 `count` — default 10, `-1` = all; entry ids are per-node and so not unique across the merged
 reply), `SLOWLOG LEN` (summed), `SLOWLOG RESET` (`+OK` only if every node succeeds), `COMMANDLOG GET <count> <type>`
 (merged newest first and truncated to `count`, same as `SLOWLOG GET`; `-1` = all), `COMMANDLOG LEN`
-(summed), `COMMANDLOG RESET` (`+OK` only if every node succeeds), `SCRIPT KILL` (succeeds if
+(summed), `COMMANDLOG RESET` (`+OK` only if every node succeeds), `HOTKEYS GET` (every node's entries
+merged by `qps`, highest first, and not truncated, since each node already caps its own list at its
+`hotkeys-top-k`; each entry is a `key`/`db`/`qps` map, a flat array in RESP2; needs Valkey 9.2+ backends
+with `hotkeys-top-k` above 0, otherwise empty; a key whose slot is migrating can show up once per node),
+`HOTKEYS RESET` (`+OK` only if every node succeeds), `SCRIPT KILL` (succeeds if
 **any** node succeeds), `SCRIPT FLUSH [ASYNC|SYNC]` (**the argument is ignored** — always
 rewritten as `SCRIPT FLUSH ASYNC` and broadcast, always replies `+OK`), `SCRIPT LOAD` (broadcast
 to every node so any shard's subsequent `EVALSHA` can find it; only one sha1 is relayed back),
@@ -200,6 +204,11 @@ mode) so they don't stall the non-blocking event loop.
 until it unsubscribes; subsequent subscribe/unsubscribe calls on the same client connection reuse
 that same pinned connection. `PUBLISH`/`SPUBLISH` need no dedicated connection — they're routed by
 channel like an ordinary single-key command.
+
+A RESP2 client in subscribe mode can only run `(P|S)SUBSCRIBE`, `(P|S)UNSUBSCRIBE` and `PING` (`PING`
+answers `["pong", arg]`), as on Valkey; anything else gets `-ERR Can't execute '<command>': ...`. This
+holds even after another client's `HELLO 3` has switched the backend subscription connections to
+RESP3, where Valkey itself would run any command. A command sent while subscribed must fit in 16KB.
 
 ## 6. Key configuration knobs (`proxy.conf`) at a glance
 

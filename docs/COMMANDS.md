@@ -362,6 +362,9 @@ The list below covers every supported command.
 | `SLOWLOG LEN` | Broadcast to every primary node |
 | `SLOWLOG RESET` | Broadcast to every primary node |
 | `TIME` | Answered by proxy |
+| `HOTKEYS GET` | Broadcast to every primary node; entries merged by qps, highest first, not truncated |
+| `HOTKEYS HELP` | Forwarded to one primary node |
+| `HOTKEYS RESET` | Broadcast to every primary node; `+OK` only if every node succeeds |
 
 ### Bloom Filter
 
