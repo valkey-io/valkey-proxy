@@ -320,6 +320,12 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     n = resp_send_raw_reply(fd3, raw, sizeof(raw), 3, "ZSCORE", "tc:resp3:zset", "a");
     CHECK(n > 0 && raw[0] == ',', "RESP3 ZSCORE: native double (,)", pass, fail);
 
+    /* INCREX BYFLOAT: both elements are native doubles in RESP3 */
+    resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "DEL", "tc:resp3:increx");
+    n = resp_send_raw_reply(fd3, raw, sizeof(raw), 4, "INCREX", "tc:resp3:increx", "BYFLOAT", "1.5");
+    CHECK(n > 0 && strcmp(raw, "*2\r\n,1.5\r\n,1.5\r\n") == 0, "RESP3 INCREX BYFLOAT: [1.5, 1.5] as native doubles",
+          pass, fail);
+
     n = resp_send_raw_reply(fd3, raw, sizeof(raw), 5, "ZRANGE", "tc:resp3:zset", "0", "-1", "WITHSCORES");
     CHECK(n > 0 && raw[0] == '*' && atoi(raw + 1) == 2,
           "RESP3 ZRANGE WITHSCORES: NOT flattened -- stays nested *2 [member,score]", pass, fail);
@@ -395,6 +401,10 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     n = resp_send_raw_reply(fd2, raw, sizeof(raw), 3, "ZSCORE", "tc:resp3:zset", "a");
     CHECK(n > 0 && strcmp(raw, "$1\r\n1\r\n") == 0, "RESP2 ZSCORE: downgraded to bulk string, not a double", pass,
           fail);
+
+    n = resp_send_raw_reply(fd2, raw, sizeof(raw), 4, "INCREX", "tc:resp3:increx", "BYFLOAT", "1.5");
+    CHECK(n > 0 && strcmp(raw, "*2\r\n$1\r\n3\r\n$3\r\n1.5\r\n") == 0,
+          "RESP2 INCREX BYFLOAT: [3, 1.5] downgraded to bulk strings", pass, fail);
 
     n = resp_send_raw_reply(fd2, raw, sizeof(raw), 5, "ZRANGE", "tc:resp3:zset", "0", "-1", "WITHSCORES");
     CHECK(n > 0 && raw[0] == '*' && atoi(raw + 1) == 4,
@@ -587,6 +597,7 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:hash");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:set");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:zset");
+    proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:increx");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:hrand");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:stream");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:geo");

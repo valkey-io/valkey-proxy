@@ -254,6 +254,8 @@ The list below covers every supported command.
 | `XREADGROUP` | Every stream key must hash to the same slot, otherwise the proxy returns `-CROSSSLOT` without contacting a backend |
 | `XREVRANGE` | |
 | `XTRIM` | |
+| `XDELEX` | |
+| `XACKDEL` | |
 
 ### String
 
@@ -284,6 +286,7 @@ The list below covers every supported command.
 | `SETRANGE` | |
 | `STRLEN` | |
 | `SUBSTR` | |
+| `INCREX` | |
 
 ### Transaction
 
