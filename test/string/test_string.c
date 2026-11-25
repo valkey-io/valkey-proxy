@@ -288,109 +288,95 @@ void run_string_tests(const char *host, int port, int *pass, int *fail) {
     /* ── DELIFEQ ────────────────────────────────────────────────────────── */
     proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:str:delifeq", "delval");
     proxy_cmd(fd, r, sizeof(r), 3, "DELIFEQ", "tc:str:delifeq", "wrongval");
-    if (r[0] == '-') {
-        printf("  [SKIP] DELIFEQ: command not supported by this server\n");
-        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:str:delifeq");
-    } else {
-        CHECK(strcmp(r, ":0") == 0, "DELIFEQ: wrong value, not deleted (returns 0)", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delifeq");
-        CHECK(strcmp(r, ":1") == 0, "DELIFEQ wrong val: key still exists", pass, fail);
+    CHECK(strcmp(r, ":0") == 0, "DELIFEQ: wrong value, not deleted (returns 0)", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delifeq");
+    CHECK(strcmp(r, ":1") == 0, "DELIFEQ wrong val: key still exists", pass, fail);
 
-        proxy_cmd(fd, r, sizeof(r), 3, "DELIFEQ", "tc:str:delifeq", "delval");
-        CHECK(strcmp(r, ":1") == 0, "DELIFEQ: correct value, key deleted (returns 1)", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delifeq");
-        CHECK(strcmp(r, ":0") == 0, "DELIFEQ correct val: key no longer exists", pass, fail);
-    }
+    proxy_cmd(fd, r, sizeof(r), 3, "DELIFEQ", "tc:str:delifeq", "delval");
+    CHECK(strcmp(r, ":1") == 0, "DELIFEQ: correct value, key deleted (returns 1)", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delifeq");
+    CHECK(strcmp(r, ":0") == 0, "DELIFEQ correct val: key no longer exists", pass, fail);
 
     /* ── DELEX (Valkey 9.2+) ────────────────────────────────────────────── */
     /* format: DELEX key <IFEQ | IFNE> value */
     proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:str:delex", "delexval");
     proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFEQ", "wrongval");
-    if (r[0] == '-') {
-        printf("  [SKIP] DELEX: command not supported by this server\n");
-        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:str:delex");
-    } else {
-        /* IFEQ */
-        CHECK(strcmp(r, ":0") == 0, "DELEX IFEQ wrong value: not deleted (returns 0)", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
-        CHECK(strcmp(r, ":1") == 0, "DELEX IFEQ wrong value: key still exists", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFEQ", "delexval");
-        CHECK(strcmp(r, ":1") == 0, "DELEX IFEQ matching value: key deleted (returns 1)", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
-        CHECK(strcmp(r, ":0") == 0, "DELEX IFEQ matching value: key no longer exists", pass, fail);
+    /* IFEQ */
+    CHECK(strcmp(r, ":0") == 0, "DELEX IFEQ wrong value: not deleted (returns 0)", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
+    CHECK(strcmp(r, ":1") == 0, "DELEX IFEQ wrong value: key still exists", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFEQ", "delexval");
+    CHECK(strcmp(r, ":1") == 0, "DELEX IFEQ matching value: key deleted (returns 1)", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
+    CHECK(strcmp(r, ":0") == 0, "DELEX IFEQ matching value: key no longer exists", pass, fail);
 
-        /* IFNE */
-        proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:str:delex", "delexval");
-        proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFNE", "delexval");
-        CHECK(strcmp(r, ":0") == 0, "DELEX IFNE same value: not deleted (returns 0)", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
-        CHECK(strcmp(r, ":1") == 0, "DELEX IFNE same value: key still exists", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFNE", "otherval");
-        CHECK(strcmp(r, ":1") == 0, "DELEX IFNE different value: key deleted (returns 1)", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
-        CHECK(strcmp(r, ":0") == 0, "DELEX IFNE different value: key no longer exists", pass, fail);
+    /* IFNE */
+    proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:str:delex", "delexval");
+    proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFNE", "delexval");
+    CHECK(strcmp(r, ":0") == 0, "DELEX IFNE same value: not deleted (returns 0)", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
+    CHECK(strcmp(r, ":1") == 0, "DELEX IFNE same value: key still exists", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFNE", "otherval");
+    CHECK(strcmp(r, ":1") == 0, "DELEX IFNE different value: key deleted (returns 1)", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:delex");
+    CHECK(strcmp(r, ":0") == 0, "DELEX IFNE different value: key no longer exists", pass, fail);
 
-        /* missing key: nothing to delete */
-        proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFNE", "otherval");
-        CHECK(strcmp(r, ":0") == 0, "DELEX missing key: returns 0", pass, fail);
+    /* missing key: nothing to delete */
+    proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex", "IFNE", "otherval");
+    CHECK(strcmp(r, ":0") == 0, "DELEX missing key: returns 0", pass, fail);
 
-        /* condition is mandatory */
-        proxy_cmd(fd, r, sizeof(r), 2, "DELEX", "tc:str:delex");
-        CHECK(r[0] == '-', "DELEX without condition: returns error", pass, fail);
+    /* condition is mandatory */
+    proxy_cmd(fd, r, sizeof(r), 2, "DELEX", "tc:str:delex");
+    CHECK(r[0] == '-', "DELEX without condition: returns error", pass, fail);
 
-        /* non-string key: error, key untouched */
-        proxy_cmd(fd, r, sizeof(r), 3, "RPUSH", "tc:str:delex:list", "a");
-        proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex:list", "IFEQ", "a");
-        CHECK(r[0] == '-', "DELEX on non-string key: returns error", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:str:delex:list");
+    /* non-string key: error, key untouched */
+    proxy_cmd(fd, r, sizeof(r), 3, "RPUSH", "tc:str:delex:list", "a");
+    proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "tc:str:delex:list", "IFEQ", "a");
+    CHECK(r[0] == '-', "DELEX on non-string key: returns error", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:str:delex:list");
 
-        /* keys in different slots are each routed to their owning node */
-        proxy_cmd(fd, r, sizeof(r), 3, "SET", "{tc:str:delex:a}k", "va");
-        proxy_cmd(fd, r, sizeof(r), 3, "SET", "{tc:str:delex:b}k", "vb");
-        proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "{tc:str:delex:a}k", "IFEQ", "va");
-        CHECK(strcmp(r, ":1") == 0, "DELEX slot a: key deleted (returns 1)", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "{tc:str:delex:b}k", "IFEQ", "vb");
-        CHECK(strcmp(r, ":1") == 0, "DELEX slot b: key deleted (returns 1)", pass, fail);
-    }
+    /* keys in different slots are each routed to their owning node */
+    proxy_cmd(fd, r, sizeof(r), 3, "SET", "{tc:str:delex:a}k", "va");
+    proxy_cmd(fd, r, sizeof(r), 3, "SET", "{tc:str:delex:b}k", "vb");
+    proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "{tc:str:delex:a}k", "IFEQ", "va");
+    CHECK(strcmp(r, ":1") == 0, "DELEX slot a: key deleted (returns 1)", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 4, "DELEX", "{tc:str:delex:b}k", "IFEQ", "vb");
+    CHECK(strcmp(r, ":1") == 0, "DELEX slot b: key deleted (returns 1)", pass, fail);
 
     /* ── MSETEX (multi-key SET with per-key TTL, fan-out) ───────────────── */
     /* format: MSETEX key1 seconds1 val1 [key2 seconds2 val2 ...] */
-    /* single key first to probe support */
+    /* single key first */
     proxy_cmd(fd, r, sizeof(r), 4, "MSETEX", "{tc:str:mse:1}k", "50", "msev1probe");
-    if (r[0] == '-') {
-        printf("  [SKIP] MSETEX: command not supported by this server\n");
-    } else {
-        CHECK(strcmp(r, "+OK") == 0, "MSETEX single key: returns +OK", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:1}k");
-        CHECK(strcmp(r, "msev1probe") == 0, "MSETEX single: value correct", pass, fail);
+    CHECK(strcmp(r, "+OK") == 0, "MSETEX single key: returns +OK", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:1}k");
+    CHECK(strcmp(r, "msev1probe") == 0, "MSETEX single: value correct", pass, fail);
 
-        /* multiple keys across different slots (fanout) — different hash tags */
-        proxy_cmd(fd, r, sizeof(r), 7, "MSETEX", "{tc:str:mse:1}k", "100", "msev1", "{tc:str:mse:2}k", "100", "msev2");
-        CHECK(strcmp(r, "+OK") == 0, "MSETEX 2 keys in cross-slot: returns +OK", pass, fail);
+    /* multiple keys across different slots (fanout) — different hash tags */
+    proxy_cmd(fd, r, sizeof(r), 7, "MSETEX", "{tc:str:mse:1}k", "100", "msev1", "{tc:str:mse:2}k", "100", "msev2");
+    CHECK(strcmp(r, "+OK") == 0, "MSETEX 2 keys in cross-slot: returns +OK", pass, fail);
 
-        proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:1}k");
-        CHECK(strcmp(r, "msev1") == 0, "MSETEX 2 keys in cross-slot: k1 value correct", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:2}k");
-        CHECK(strcmp(r, "msev2") == 0, "MSETEX 2 keys in cross-slot: k2 value correct", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:1}k");
+    CHECK(strcmp(r, "msev1") == 0, "MSETEX 2 keys in cross-slot: k1 value correct", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:2}k");
+    CHECK(strcmp(r, "msev2") == 0, "MSETEX 2 keys in cross-slot: k2 value correct", pass, fail);
 
-        proxy_cmd(fd, r, sizeof(r), 2, "TTL", "{tc:str:mse:1}k");
-        {
-            long long v = atoll(r + 1);
-            CHECK(r[0] == ':' && v > 0 && v <= 100, "MSETEX 2 keys in cross-slot: k1 TTL in (0,100]", pass, fail);
-        }
-        proxy_cmd(fd, r, sizeof(r), 2, "TTL", "{tc:str:mse:2}k");
-        {
-            long long v = atoll(r + 1);
-            CHECK(r[0] == ':' && v > 0 && v <= 100, "MSETEX 2 keys in cross-slot: k2 TTL in (0,100]", pass, fail);
-        }
-
-        /* three keys across three different slots */
-        proxy_cmd(fd, r, sizeof(r), 10, "MSETEX", "{tc:str:mse:1}k", "100", "msev1b", "{tc:str:mse:2}k", "100",
-                  "msev2b", "{tc:str:mse:3}k", "100", "msev3b");
-        CHECK(strcmp(r, "+OK") == 0, "MSETEX 3 keys in cross-slot: returns +OK", pass, fail);
-        proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:3}k");
-        CHECK(strcmp(r, "msev3b") == 0, "MSETEX 3 keys in cross-slot: k3 value correct", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "TTL", "{tc:str:mse:1}k");
+    {
+        long long v = atoll(r + 1);
+        CHECK(r[0] == ':' && v > 0 && v <= 100, "MSETEX 2 keys in cross-slot: k1 TTL in (0,100]", pass, fail);
     }
+    proxy_cmd(fd, r, sizeof(r), 2, "TTL", "{tc:str:mse:2}k");
+    {
+        long long v = atoll(r + 1);
+        CHECK(r[0] == ':' && v > 0 && v <= 100, "MSETEX 2 keys in cross-slot: k2 TTL in (0,100]", pass, fail);
+    }
+
+    /* three keys across three different slots */
+    proxy_cmd(fd, r, sizeof(r), 10, "MSETEX", "{tc:str:mse:1}k", "100", "msev1b", "{tc:str:mse:2}k", "100", "msev2b",
+              "{tc:str:mse:3}k", "100", "msev3b");
+    CHECK(strcmp(r, "+OK") == 0, "MSETEX 3 keys in cross-slot: returns +OK", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "GET", "{tc:str:mse:3}k");
+    CHECK(strcmp(r, "msev3b") == 0, "MSETEX 3 keys in cross-slot: k3 value correct", pass, fail);
 
     proxy_cmd(fd, r, sizeof(r), 1, "FLUSHDB");
     close(fd);
