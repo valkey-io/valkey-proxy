@@ -48,9 +48,9 @@ jobs:
       matrix:
         # valkey-bundle ships valkey-server/valkey-cli together with the
         # bloom, json and search modules that the module suites need.
-        # 9.0 lacks commands the suites expect (e.g. HGETDEL) and hangs them.
-        # Move 9.2-rc2 to 9.2 once that bundle tag is published.
-        valkey: ['9.1', '9.2-rc2']
+        # Only 9.2.0 is supported: the suites expect commands that are new in
+        # 9.2 (e.g. HOTKEYS, DELEX) to exist.
+        valkey: ['9.2.0']
     container:
       image: valkey/valkey-bundle:${{ matrix.valkey }}
     steps:
