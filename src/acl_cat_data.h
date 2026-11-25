@@ -144,6 +144,14 @@ static const char *ACL_CAT_READ[] = {
     "hpexpiretime",
     "JSON.STRLEN",
     "zcount",
+    "phscan",
+    "phget",
+    "phmget",
+    "phpathcount",
+    "phgetall",
+    "phprefixes",
+    "phpathscan",
+    "phpathexists",
     NULL};
 
 static const char *ACL_CAT_WRITE[] = {
@@ -281,6 +289,10 @@ static const char *ACL_CAT_WRITE[] = {
     "xadd",
     "psetex",
     "JSON.ARRAPPEND",
+    "phdel",
+    "phmset",
+    "phset",
+    "phpathdel",
     NULL};
 
 static const char *ACL_CAT_SET[] = {
@@ -657,6 +669,11 @@ static const char *ACL_CAT_FAST[] = {
     "zcount",
     "xadd",
     "JSON.ARRAPPEND",
+    "phget",
+    "phmget",
+    "phpathexists",
+    "phmset",
+    "phset",
     NULL};
 
 static const char *ACL_CAT_SLOW[] = {
@@ -846,6 +863,13 @@ static const char *ACL_CAT_SLOW[] = {
     "acl|whoami",
     "georadiusbymember",
     "psetex",
+    "phscan",
+    "phpathcount",
+    "phgetall",
+    "phprefixes",
+    "phpathscan",
+    "phdel",
+    "phpathdel",
     NULL};
 
 static const char *ACL_CAT_BLOCKING[] = {
@@ -936,6 +960,21 @@ static const char *ACL_CAT_SCRIPTING[] = {
     "function|stats",
     NULL};
 
+static const char *ACL_CAT_PATHHASH[] = {
+    "phscan",
+    "phget",
+    "phmget",
+    "phpathcount",
+    "phgetall",
+    "phprefixes",
+    "phpathscan",
+    "phpathexists",
+    "phdel",
+    "phmset",
+    "phset",
+    "phpathdel",
+    NULL};
+
 static const char *ACL_CAT_BLOOM[] = {
     "BF.RESERVE",
     "BF.INFO",
@@ -1004,6 +1043,7 @@ static const AclCategory ACL_CATEGORIES[] = {
     {"connection", ACL_CAT_CONNECTION},
     {"transaction", ACL_CAT_TRANSACTION},
     {"scripting", ACL_CAT_SCRIPTING},
+    {"pathhash", ACL_CAT_PATHHASH},
     {"bloom", ACL_CAT_BLOOM},
     {"json", ACL_CAT_JSON},
     {"search", ACL_CAT_SEARCH},

@@ -102,6 +102,17 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         }
         CHECK(has_get && has_set, "ACL CAT string: lists get and set", pass, fail);
     }
+    proxy_cmd(fd, r, sizeof(r), 3, "ACL", "CAT", "pathhash");
+    CHECK(r[0] == '*' && atoi(r + 1) == 12, "ACL CAT pathhash: all 12 PH* commands", pass, fail);
+    if (r[0] == '*') {
+        int n = atoi(r + 1), has_phget = 0, has_phset = 0;
+        for (int i = 0; i < n; i++) {
+            resp_next_str(fd, r, sizeof(r));
+            if (!strcmp(r, "phget")) has_phget = 1;
+            if (!strcmp(r, "phset")) has_phset = 1;
+        }
+        CHECK(has_phget && has_phset, "ACL CAT pathhash: lists phget and phset", pass, fail);
+    }
     proxy_cmd(fd, r, sizeof(r), 3, "ACL", "CAT", "admin");
     CHECK(r[0] == '*', "ACL CAT admin: returns an array", pass, fail);
     if (r[0] == '*') {
