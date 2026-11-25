@@ -170,6 +170,74 @@ void run_string_tests(const char *host, int port, int *pass, int *fail) {
         CHECK(v > 17.4 && v < 17.6, "INCRBYFLOAT: 16+1.5=17.5", pass, fail);
     }
 
+    /* ── INCREX (Valkey 9.2) ────────────────────────────────────────────── */
+    /* Always replies [value after, increment applied]; a skipped or
+     * out-of-bounds increment is [current value, 0], not an error. */
+    {
+        char raw[256];
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:str:increx", "10");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 2, "INCREX", "tc:str:increx");
+        CHECK(!strcmp(raw, "*2\r\n:11\r\n:1\r\n"), "INCREX: default increment 1 returns [11, 1]", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "INCREX", "tc:str:increx", "BYINT", "5", "EX", "60");
+        CHECK(!strcmp(raw, "*2\r\n:16\r\n:5\r\n"), "INCREX BYINT 5 EX 60: returns [16, 5]", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "TTL", "tc:str:increx");
+        CHECK(r[0] == ':' && atoi(r + 1) > 0 && atoi(r + 1) <= 60, "INCREX EX 60: key gets a TTL", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "INCREX", "tc:str:increx", "BYINT", "100", "UBOUND", "20");
+        CHECK(!strcmp(raw, "*2\r\n:16\r\n:0\r\n"), "INCREX UBOUND 20: out of bounds rejected, returns [16, 0]", pass,
+              fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "INCREX", "tc:str:increx", "BYINT", "100", "UBOUND", "20",
+                            "SATURATE");
+        CHECK(!strcmp(raw, "*2\r\n:20\r\n:4\r\n"), "INCREX UBOUND 20 SATURATE: clamped, returns [20, 4]", pass, fail);
+
+        /* bounded counter from the docs: 2 - 3 saturates at LBOUND 0 */
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:str:increx", "2");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "INCREX", "tc:str:increx", "BYINT", "-3", "LBOUND", "0",
+                            "SATURATE");
+        CHECK(!strcmp(raw, "*2\r\n:0\r\n:-2\r\n"), "INCREX LBOUND 0 SATURATE: 2-3 clamped, returns [0, -2]", pass,
+              fail);
+
+        /* NX / XX on a missing key */
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:str:increx:new");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "INCREX", "tc:str:increx:new", "XX");
+        CHECK(!strcmp(raw, "*2\r\n:0\r\n:0\r\n"), "INCREX XX on missing key: skipped, returns [0, 0]", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:str:increx:new");
+        CHECK(strcmp(r, ":0") == 0, "INCREX XX on missing key: key not created", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "INCREX", "tc:str:increx:new", "NX");
+        CHECK(!strcmp(raw, "*2\r\n:1\r\n:1\r\n"), "INCREX NX on missing key: creates it, returns [1, 1]", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "INCREX", "tc:str:increx:new", "NX");
+        CHECK(!strcmp(raw, "*2\r\n:1\r\n:0\r\n"), "INCREX NX on existing key: skipped, returns [1, 0]", pass, fail);
+
+        /* BYFLOAT: a RESP2 client gets both values as bulk strings */
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:str:increx:f");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 4, "INCREX", "tc:str:increx:f", "BYFLOAT", "2.5");
+        CHECK(!strcmp(raw, "*2\r\n$3\r\n2.5\r\n$3\r\n2.5\r\n"), "INCREX BYFLOAT 2.5 on new key: returns [2.5, 2.5]",
+              pass, fail);
+
+        /* errors are relayed from the backend */
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "INCREX", "tc:str:increx", "BYINT", "1", "BYFLOAT", "1");
+        CHECK(raw[0] == '-', "INCREX BYINT with BYFLOAT: syntax error", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:str:increx", "notnum");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 2, "INCREX", "tc:str:increx");
+        CHECK(raw[0] == '-', "INCREX on non-integer value: error", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "RPUSH", "tc:str:increx:list", "a");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 2, "INCREX", "tc:str:increx:list");
+        CHECK(!strncmp(raw, "-WRONGTYPE", 10), "INCREX on a list: WRONGTYPE", pass, fail);
+
+        /* keys in different slots are each routed to their owning node */
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", "{tc:str:increx:a}k", "100");
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", "{tc:str:increx:b}k", "200");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 4, "INCREX", "{tc:str:increx:a}k", "BYINT", "1");
+        CHECK(!strcmp(raw, "*2\r\n:101\r\n:1\r\n"), "INCREX slot a: returns [101, 1]", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 4, "INCREX", "{tc:str:increx:b}k", "BYINT", "2");
+        CHECK(!strcmp(raw, "*2\r\n:202\r\n:2\r\n"), "INCREX slot b: returns [202, 2]", pass, fail);
+
+        const char *keys[] = {"tc:str:increx",      "tc:str:increx:new",  "tc:str:increx:f",
+                              "tc:str:increx:list", "{tc:str:increx:a}k", "{tc:str:increx:b}k"};
+        for (int i = 0; i < 6; i++) proxy_cmd(fd, r, sizeof(r), 2, "DEL", keys[i]);
+    }
+
     /* INCR on nonexistent key (initialises to 0 then increments) */
     proxy_cmd(fd, r, sizeof(r), 2, "INCR", "tc:str:incr:new");
     CHECK(strcmp(r, ":1") == 0, "INCR: nonexistent key initialises to 0, returns 1", pass, fail);

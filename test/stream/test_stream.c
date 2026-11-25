@@ -255,6 +255,95 @@ void run_stream_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd, r, sizeof(r), 4, "XACK", "tc:st:grp", "grp1", grp_id1);
     CHECK(strcmp(r, ":0") == 0, "XACK: re-acknowledge returns 0", pass, fail);
 
+    /* ── XDELEX / XACKDEL (Valkey 9.2) ───────────────────────────────── */
+    /* One integer per ID, in the order given: -1 not found (or, for
+     * XACKDEL, not pending in that group), 1 deleted, 2 kept because a
+     * consumer group still needs it (ACKED). The flows follow the
+     * valkey.io examples. */
+    {
+        char raw[1024];
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:st:dx");
+        proxy_cmd(fd, r, sizeof(r), 5, "XADD", "tc:st:dx", "1-1", "a", "1");
+        proxy_cmd(fd, r, sizeof(r), 5, "XGROUP", "CREATE", "tc:st:dx", "grp", "0");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 9, "XREADGROUP", "GROUP", "grp", "c1", "COUNT", "10", "STREAMS",
+                            "tc:st:dx", ">");
+        CHECK(raw[0] == '*' && strstr(raw, "1-1"), "XDELEX setup: XREADGROUP delivers the entry to grp", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XDELEX", "tc:st:dx", "ACKED", "IDS", "1", "1-1");
+        CHECK(!strcmp(raw, "*1\r\n:2\r\n"), "XDELEX ACKED on a pending entry: kept, returns [2]", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "XLEN", "tc:st:dx");
+        CHECK(strcmp(r, ":1") == 0, "XDELEX ACKED on a pending entry: XLEN still 1", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 4, "XACK", "tc:st:dx", "grp", "1-1");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XDELEX", "tc:st:dx", "ACKED", "IDS", "1", "1-1");
+        CHECK(!strcmp(raw, "*1\r\n:1\r\n"), "XDELEX ACKED after XACK: deleted, returns [1]", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "XLEN", "tc:st:dx");
+        CHECK(strcmp(r, ":0") == 0, "XDELEX ACKED after XACK: XLEN 0", pass, fail);
+
+        /* default mode (KEEPREF); results follow the order of the IDs */
+        proxy_cmd(fd, r, sizeof(r), 5, "XADD", "tc:st:dx", "2-1", "a", "1");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XDELEX", "tc:st:dx", "IDS", "2", "9-9", "2-1");
+        CHECK(!strcmp(raw, "*2\r\n:-1\r\n:1\r\n"), "XDELEX two IDs: [-1, 1] in the order given", pass, fail);
+
+        /* missing key: -1 per ID, and the key isn't created */
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:st:dx:none");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XDELEX", "tc:st:dx:none", "IDS", "2", "1-1", "2-2");
+        CHECK(!strcmp(raw, "*2\r\n:-1\r\n:-1\r\n"), "XDELEX on missing key: [-1, -1]", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:st:dx:none");
+        CHECK(strcmp(r, ":0") == 0, "XDELEX on missing key: key not created", pass, fail);
+
+        /* backend errors are relayed */
+        resp_send_raw_reply(fd, raw, sizeof(raw), 5, "XDELEX", "tc:st:dx", "IDS", "2", "1-1");
+        CHECK(raw[0] == '-', "XDELEX numids larger than the IDs given: error", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XDELEX", "tc:st:dx", "BOGUS", "IDS", "1", "1-1");
+        CHECK(raw[0] == '-', "XDELEX unknown mode: error", pass, fail);
+
+        /* XACKDEL ACKED with two groups: kept until the last group acks */
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:st:ad");
+        proxy_cmd(fd, r, sizeof(r), 5, "XADD", "tc:st:ad", "1-1", "a", "1");
+        proxy_cmd(fd, r, sizeof(r), 5, "XGROUP", "CREATE", "tc:st:ad", "g1", "0");
+        proxy_cmd(fd, r, sizeof(r), 5, "XGROUP", "CREATE", "tc:st:ad", "g2", "0");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 9, "XREADGROUP", "GROUP", "g1", "c1", "COUNT", "10", "STREAMS",
+                            "tc:st:ad", ">");
+        CHECK(raw[0] == '*' && strstr(raw, "1-1"), "XACKDEL setup: XREADGROUP delivers the entry to g1", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "XACKDEL", "tc:st:ad", "g1", "ACKED", "IDS", "1", "1-1");
+        CHECK(!strcmp(raw, "*1\r\n:2\r\n"), "XACKDEL ACKED, g2 not done: acked but kept, returns [2]", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "XLEN", "tc:st:ad");
+        CHECK(strcmp(r, ":1") == 0, "XACKDEL ACKED, g2 not done: XLEN still 1", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 9, "XREADGROUP", "GROUP", "g2", "c1", "COUNT", "10", "STREAMS",
+                            "tc:st:ad", ">");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "XACKDEL", "tc:st:ad", "g2", "ACKED", "IDS", "1", "1-1");
+        CHECK(!strcmp(raw, "*1\r\n:1\r\n"), "XACKDEL ACKED by the last group: deleted, returns [1]", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "XLEN", "tc:st:ad");
+        CHECK(strcmp(r, ":0") == 0, "XACKDEL ACKED by the last group: XLEN 0", pass, fail);
+
+        /* DELREF also drops the entry from every other group's PEL */
+        proxy_cmd(fd, r, sizeof(r), 5, "XADD", "tc:st:ad", "2-1", "a", "1");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 9, "XREADGROUP", "GROUP", "g1", "c1", "COUNT", "10", "STREAMS",
+                            "tc:st:ad", ">");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 9, "XREADGROUP", "GROUP", "g2", "c1", "COUNT", "10", "STREAMS",
+                            "tc:st:ad", ">");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "XACKDEL", "tc:st:ad", "g1", "DELREF", "IDS", "1", "2-1");
+        CHECK(!strcmp(raw, "*1\r\n:1\r\n"), "XACKDEL DELREF: deleted, returns [1]", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "XPENDING", "tc:st:ad", "g2");
+        CHECK(!strncmp(raw, "*4\r\n:0\r\n", 8), "XACKDEL DELREF: removed from g2's pending list too", pass, fail);
+
+        /* unknown group / missing key: -1 */
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XACKDEL", "tc:st:ad", "nogroup", "IDS", "1", "1-1");
+        CHECK(!strcmp(raw, "*1\r\n:-1\r\n"), "XACKDEL unknown group: returns [-1]", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XACKDEL", "tc:st:dx:none", "g1", "IDS", "1", "1-1");
+        CHECK(!strcmp(raw, "*1\r\n:-1\r\n"), "XACKDEL on missing key: returns [-1]", pass, fail);
+
+        /* wrong type */
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:st:dx:str", "x");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 5, "XDELEX", "tc:st:dx:str", "IDS", "1", "1-1");
+        CHECK(!strncmp(raw, "-WRONGTYPE", 10), "XDELEX on a string: WRONGTYPE", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "XACKDEL", "tc:st:dx:str", "g", "IDS", "1", "1-1");
+        CHECK(!strncmp(raw, "-WRONGTYPE", 10), "XACKDEL on a string: WRONGTYPE", pass, fail);
+
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:st:dx");
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:st:ad");
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:st:dx:str");
+    }
+
     /* ── XCLAIM ───────────────────────────────────────────────────────── */
     /* claim grp_id2 and grp_id3 for consumer2; min-idle-time=0 */
     resp_send(fd, 7, "XCLAIM", "tc:st:grp", "grp1", "consumer2", "0", grp_id2, grp_id3);
