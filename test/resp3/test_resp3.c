@@ -310,6 +310,14 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     resp_send_raw_reply(fd3, raw, sizeof(raw), 4, "HSET", "tc:resp3:hash", "f1", "v1");
     n = resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "HGETALL", "tc:resp3:hash");
     CHECK(n > 0 && raw[0] == '%' && atoi(raw + 1) == 1, "RESP3 HGETALL: native map (%1)", pass, fail);
+    resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "DEL", "tc:resp3:ph");
+    resp_send_raw_reply(fd3, raw, sizeof(raw), 7, "PHSET", "tc:resp3:ph", "a/b", "FIELDS", "1", "f1", "v1");
+    n = resp_send_raw_reply(fd3, raw, sizeof(raw), 8, "PHSET", "tc:resp3:ph", "a/b", "FNX", "FIELDS", "1", "f1", "x");
+    CHECK(n > 0 && strcmp(raw, "_\r\n") == 0, "RESP3 PHSET FNX not applied: native null (_)", pass, fail);
+    n = resp_send_raw_reply(fd3, raw, sizeof(raw), 3, "PHGETALL", "tc:resp3:ph", "a/b");
+    CHECK(n > 0 && strcmp(raw, "%1\r\n$2\r\nf1\r\n$2\r\nv1\r\n") == 0, "RESP3 PHGETALL: native map (%1)", pass, fail);
+    n = resp_send_raw_reply(fd3, raw, sizeof(raw), 4, "PHGET", "tc:resp3:ph", "a/b", "nof");
+    CHECK(n > 0 && strcmp(raw, "*1\r\n_\r\n") == 0, "RESP3 PHGET missing field: native null (_)", pass, fail);
 
     resp_send_raw_reply(fd3, raw, sizeof(raw), 3, "SADD", "tc:resp3:set", "a");
     n = resp_send_raw_reply(fd3, raw, sizeof(raw), 2, "SMEMBERS", "tc:resp3:set");
@@ -393,6 +401,13 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     n = resp_send_raw_reply(fd2, raw, sizeof(raw), 2, "HGETALL", "tc:resp3:hash");
     CHECK(n > 0 && raw[0] == '*' && atoi(raw + 1) == 2, "RESP2 HGETALL: downgraded to flat *2 array, not a map", pass,
           fail);
+    n = resp_send_raw_reply(fd2, raw, sizeof(raw), 3, "PHGETALL", "tc:resp3:ph", "a/b");
+    CHECK(n > 0 && strcmp(raw, "*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n") == 0,
+          "RESP2 PHGETALL: downgraded to flat *2 array, not a map", pass, fail);
+    n = resp_send_raw_reply(fd2, raw, sizeof(raw), 4, "PHGET", "tc:resp3:ph", "a/b", "nof");
+    CHECK(n > 0 && strcmp(raw, "*1\r\n$-1\r\n") == 0, "RESP2 PHGET missing field: nil bulk ($-1)", pass, fail);
+    n = resp_send_raw_reply(fd2, raw, sizeof(raw), 8, "PHSET", "tc:resp3:ph", "a/b", "FNX", "FIELDS", "1", "f1", "x");
+    CHECK(n > 0 && strcmp(raw, "$-1\r\n") == 0, "RESP2 PHSET FNX not applied: nil bulk ($-1)", pass, fail);
 
     n = resp_send_raw_reply(fd2, raw, sizeof(raw), 2, "SMEMBERS", "tc:resp3:set");
     CHECK(n > 0 && raw[0] == '*' && atoi(raw + 1) == 1, "RESP2 SMEMBERS: downgraded to flat *1 array, not a set", pass,
@@ -598,6 +613,7 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:set");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:zset");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:increx");
+    proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:ph");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:hrand");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:stream");
     proxy_cmd(fd2, r, sizeof(r), 2, "DEL", "tc:resp3:geo");

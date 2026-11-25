@@ -291,6 +291,110 @@ void run_hash_tests(const char *host, int port, int *pass, int *fail) {
         CHECK(r2[0] == ':' && v > 0 && v <= 100, "HSETEX: field TTL is in (0, 100]", pass, fail);
     }
 
+    /* ── Path hash (Valkey 9.2) ──────────────────────────────────────── */
+    /* Layout: a/b {f1:v1, f2:v2}, a/c {f1:x}, z {q:w}. */
+    {
+        char raw[1024];
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:hs:ph");
+        proxy_cmd(fd, r, sizeof(r), 19, "PHMSET", "tc:hs:ph", "a/b", "FIELDS", "2", "f1", "v1", "f2", "v2", "a/c",
+                  "FIELDS", "1", "f1", "x", "z", "FIELDS", "1", "q", "w");
+        CHECK(strcmp(r, "+OK") == 0, "PHMSET: three paths returns OK", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 5, "PHGET", "tc:hs:ph", "a/b", "f1", "nof");
+        CHECK(!strcmp(raw, "*2\r\n$2\r\nv1\r\n$-1\r\n"), "PHGET: [v1, nil] for an existing and a missing field", pass,
+              fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 4, "PHGET", "tc:hs:ph:none", "a", "f");
+        CHECK(!strcmp(raw, "*1\r\n$-1\r\n"), "PHGET on missing key: [nil]", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "PHGETALL", "tc:hs:ph", "a/b");
+        CHECK(raw[0] == '*' && atoi(raw + 1) == 4 && strstr(raw, "$2\r\nf1\r\n$2\r\nv1\r\n") &&
+                  strstr(raw, "$2\r\nf2\r\n$2\r\nv2\r\n"),
+              "PHGETALL: flat field/value array of the path's payload", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "PHGETALL", "tc:hs:ph", "nopath");
+        CHECK(!strcmp(raw, "*0\r\n"), "PHGETALL on missing path: empty array", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 11, "PHMGET", "tc:hs:ph", "a/b", "FIELDS", "2", "f1", "f2", "nop",
+                            "FIELDS", "1", "f1");
+        CHECK(!strcmp(raw, "*3\r\n$2\r\nv1\r\n$2\r\nv2\r\n$-1\r\n"), "PHMGET two paths: [v1, v2, nil]", pass, fail);
+
+        proxy_cmd(fd, r, sizeof(r), 2, "PHPATHCOUNT", "tc:hs:ph");
+        CHECK(strcmp(r, ":3") == 0, "PHPATHCOUNT: 3 paths", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 4, "PHPATHCOUNT", "tc:hs:ph", "PREFIX", "a/");
+        CHECK(strcmp(r, ":2") == 0, "PHPATHCOUNT PREFIX a/: 2 paths", pass, fail);
+
+        proxy_cmd(fd, r, sizeof(r), 3, "PHPATHEXISTS", "tc:hs:ph", "a/b");
+        CHECK(strcmp(r, ":1") == 0, "PHPATHEXISTS: existing path returns 1", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "PHPATHEXISTS", "tc:hs:ph", "a");
+        CHECK(strcmp(r, ":0") == 0, "PHPATHEXISTS: a bare prefix is not a path, returns 0", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "PHPATHSCAN", "tc:hs:ph", "0", "PREFIX", "a", "COUNT", "10");
+        CHECK(!strcmp(raw, "*2\r\n$1\r\n0\r\n*2\r\n$3\r\na/b\r\n$3\r\na/c\r\n"),
+              "PHPATHSCAN PREFIX a: cursor 0, [a/b, a/c]", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "PHPREFIXES", "tc:hs:ph", "a/b/c");
+        CHECK(!strcmp(raw, "*1\r\n$3\r\na/b\r\n"), "PHPREFIXES: deepest stored prefix of a/b/c is a/b", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 5, "PHPREFIXES", "tc:hs:ph", "a/b/c", "LENGTHS", "WITHVALUES");
+        CHECK(raw[0] == '*' && !strncmp(raw, "*1\r\n*2\r\n:3\r\n*4\r\n", 16),
+              "PHPREFIXES LENGTHS WITHVALUES: [[3, flat field/value array]]", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "PHPREFIXES", "tc:hs:ph", "a/c/d", "FIELDS", "2", "f1", "zz");
+        CHECK(!strcmp(raw, "*1\r\n*2\r\n$3\r\na/c\r\n*2\r\n$1\r\nx\r\n$-1\r\n"), "PHPREFIXES FIELDS: [[a/c, [x, nil]]]",
+              pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "PHPREFIXES", "tc:hs:ph", "nomatch");
+        CHECK(!strcmp(raw, "*0\r\n"), "PHPREFIXES with no match: empty array", pass, fail);
+
+        resp_send_raw_reply(fd, raw, sizeof(raw), 8, "PHSCAN", "tc:hs:ph", "a/b", "0", "MATCH", "f1", "COUNT", "10");
+        CHECK(!strcmp(raw, "*2\r\n$1\r\n0\r\n*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n"), "PHSCAN MATCH f1: cursor 0, [f1, v1]",
+              pass, fail);
+
+        /* ── writes: PHSET / PHDEL / PHPATHDEL ── */
+        proxy_cmd(fd, r, sizeof(r), 7, "PHSET", "tc:hs:ph", "a/b", "FIELDS", "1", "f1", "v9");
+        CHECK(strcmp(r, "+OK") == 0, "PHSET: overwrite a field returns OK", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 8, "PHSET", "tc:hs:ph", "a/b", "FNX", "FIELDS", "1", "f1", "zz");
+        CHECK(!strcmp(raw, "$-1\r\n"), "PHSET FNX on an existing field: nil, nothing set", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 8, "PHSET", "tc:hs:ph", "a/b", "FXX", "FIELDS", "1", "f3", "zz");
+        CHECK(!strcmp(raw, "$-1\r\n"), "PHSET FXX on a missing field: nil, nothing set", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 8, "PHSET", "tc:hs:ph", "a/b", "FXX", "FIELDS", "1", "f1", "v1");
+        CHECK(!strcmp(raw, "+OK\r\n"), "PHSET FXX on an existing field: OK", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 4, "PHGET", "tc:hs:ph", "a/b", "f1");
+        CHECK(!strcmp(raw, "*1\r\n$2\r\nv1\r\n"), "PHSET: f1 is v1 after FNX/FXX", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 7, "PHSET", "tc:hs:ph", "a/c/d", "FIELDS", "1", "y", "2");
+        CHECK(strcmp(r, "+OK") == 0, "PHSET: new nested path a/c/d returns OK", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "PHPATHCOUNT", "tc:hs:ph");
+        CHECK(strcmp(r, ":4") == 0, "PHSET: PHPATHCOUNT now 4", pass, fail);
+
+        proxy_cmd(fd, r, sizeof(r), 5, "PHDEL", "tc:hs:ph", "a/b", "f2", "nof");
+        CHECK(strcmp(r, ":1") == 0, "PHDEL: one existing and one missing field deletes 1", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "PHGETALL", "tc:hs:ph", "a/b");
+        CHECK(!strcmp(raw, "*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n"), "PHDEL: a/b left with only f1", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "PHDEL", "tc:hs:ph", "z");
+        CHECK(strcmp(r, ":1") == 0, "PHDEL without fields: deletes the path's payload", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "PHPATHEXISTS", "tc:hs:ph", "z");
+        CHECK(strcmp(r, ":0") == 0, "PHDEL without fields: path z is gone", pass, fail);
+
+        proxy_cmd(fd, r, sizeof(r), 3, "PHPATHDEL", "tc:hs:ph", "a/c");
+        CHECK(strcmp(r, ":1") == 0, "PHPATHDEL a/c: deletes just that path", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "PHPATHEXISTS", "tc:hs:ph", "a/c/d");
+        CHECK(strcmp(r, ":1") == 0, "PHPATHDEL a/c: subpath a/c/d kept", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 4, "PHPATHDEL", "tc:hs:ph", "a", "WITHSUBPATHS");
+        CHECK(strcmp(r, ":2") == 0, "PHPATHDEL a WITHSUBPATHS: deletes a/b and a/c/d", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 2, "EXISTS", "tc:hs:ph");
+        CHECK(strcmp(r, ":0") == 0, "PHPATHDEL: deleting the last path removes the key", pass, fail);
+
+        /* backend errors are relayed */
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "PHGET", "tc:hs:ph", "a/b");
+        CHECK(raw[0] == '-', "PHGET without a field: arity error", pass, fail);
+        proxy_cmd(fd, r, sizeof(r), 3, "SET", "tc:hs:ph:str", "x");
+        resp_send_raw_reply(fd, raw, sizeof(raw), 3, "PHPATHEXISTS", "tc:hs:ph:str", "a");
+        CHECK(!strncmp(raw, "-WRONGTYPE", 10), "PHPATHEXISTS on a string: WRONGTYPE", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 7, "PHSET", "tc:hs:ph:str", "a", "FIELDS", "1", "f", "v");
+        CHECK(!strncmp(raw, "-WRONGTYPE", 10), "PHSET on a string: WRONGTYPE", pass, fail);
+        resp_send_raw_reply(fd, raw, sizeof(raw), 6, "PHSET", "tc:hs:ph", "a", "FIELDS", "2", "f1");
+        CHECK(raw[0] == '-', "PHSET numfields larger than the pairs given: error", pass, fail);
+
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:hs:ph");
+        proxy_cmd(fd, r, sizeof(r), 2, "DEL", "tc:hs:ph:str");
+    }
+
     proxy_cmd(fd, r, sizeof(r), 1, "FLUSHDB");
     close(fd);
 }

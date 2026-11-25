@@ -112,6 +112,23 @@ The list below covers every supported command.
 | `HTTL` | |
 | `HVALS` | |
 
+### Path Hash
+
+| Command | Notes |
+|---|---|
+| `PHGET` | |
+| `PHGETALL` | |
+| `PHMGET` | |
+| `PHPATHCOUNT` | |
+| `PHPATHEXISTS` | |
+| `PHPATHSCAN` | |
+| `PHPREFIXES` | |
+| `PHSCAN` | |
+| `PHDEL` | |
+| `PHPATHDEL` | |
+| `PHSET` | |
+| `PHMSET` | |
+
 ### HyperLogLog
 
 | Command | Notes |
