@@ -999,10 +999,11 @@ static void client_process_input(Worker *w, ClientConn *client) {
      * INFO parse all their arguments from hbuf too, so they need the same,
      * and so does CLIENT (CLIENT LIST's filters), and ACL CAT (its category). */
     /* A multiplexed single-key command is likewise sent whole from hbuf
-     * (client_can_mux() made sure it fits). */
+     * (client_can_mux() made sure it fits), and so is every command bound
+     * for a subscription connection (handle_pubsub_cmd()). */
     int need_whole = !strcmp(cmd, "HELLO") || !strcmp(cmd, "PROXY") || !strcmp(cmd, "INFO") || !strcmp(cmd, "CLIENT") ||
                      !strcmp(cmd, "CLUSTER") || (client->mux_cmd && cls == CMD_CLASS_SINGLE_KEY) ||
-                     (!strcmp(cmd, "ACL") && keylen == 3 && !strncasecmp(key, "CAT", 3));
+                     (!strcmp(cmd, "ACL") && keylen == 3 && !strncasecmp(key, "CAT", 3)) || cls == CMD_CLASS_PUBSUB;
     if (need_whole && client->hbuf_len < total_cmd_len) {
         /* Too big to hold: reply with an error and skip the command's
          * bytes, so the connection and anything pipelined after it survive. */

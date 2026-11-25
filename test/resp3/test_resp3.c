@@ -499,8 +499,41 @@ void run_resp3_tests(const char *host, int port, int *pass, int *fail) {
             n = resp_send_raw_reply(s3, raw, sizeof(raw), 2, "CLIENT", "LIST");
             CHECK(n > 0 && strstr(raw, "-ERR CLIENT LIST is not supported while subscribed"),
                   "RESP3 subscriber: CLIENT LIST refused, not the backend's list", pass, fail);
+            n = resp_send_raw_reply(s3, raw, sizeof(raw), 1, "PING");
+            CHECK(n > 0 && !strcmp(raw, "+PONG\r\n"), "RESP3 subscriber: PING answers +PONG", pass, fail);
             close(s3);
         }
+    }
+
+    /* With RESP3 sub_conns, a subscribed RESP2 client still gets RESP2
+     * subscribe-mode semantics: PING answers ["pong", arg], and any command
+     * but (P|S)(UN)SUBSCRIBE / PING is refused rather than run by the
+     * backend, in order behind the replies before it */
+    {
+        int s2 = proxy_connect(host, port);
+        resp_send_raw_reply(s2, raw, sizeof(raw), 2, "SUBSCRIBE", "tc:resp3:ping");
+        n = resp_send_raw_reply(s2, raw, sizeof(raw), 1, "PING");
+        CHECK(n > 0 && !strcmp(raw, "*2\r\n$4\r\npong\r\n$0\r\n\r\n"),
+              "RESP2 subscriber on a RESP3 sub_conn: PING answers [pong, \"\"]", pass, fail);
+        n = resp_send_raw_reply(s2, raw, sizeof(raw), 2, "PING", "hi");
+        CHECK(n > 0 && !strcmp(raw, "*2\r\n$4\r\npong\r\n$2\r\nhi\r\n"),
+              "RESP2 subscriber on a RESP3 sub_conn: PING hi answers [pong, hi]", pass, fail);
+        n = resp_send_raw_reply(s2, raw, sizeof(raw), 2, "GET", "tc:resp3:k1");
+        CHECK(n > 0 && !strncmp(raw, "-ERR Can't execute 'get': only (P|S)SUBSCRIBE", 45),
+              "RESP2 subscriber on a RESP3 sub_conn: GET refused, not run", pass, fail);
+        n = resp_send_raw_reply(s2, raw, sizeof(raw), 2, "CLIENT", "INFO");
+        CHECK(n > 0 && !strncmp(raw, "-ERR Can't execute 'client|info'", 32),
+              "RESP2 subscriber on a RESP3 sub_conn: CLIENT INFO refused as client|info", pass, fail);
+        const char *p = "*2\r\n$9\r\nSUBSCRIBE\r\n$13\r\ntc:resp3:pin2\r\n*1\r\n$6\r\nDBSIZE\r\n*1\r\n$4\r\nPING\r\n";
+        int ok = s2 >= 0 && write(s2, p, strlen(p)) == (ssize_t)strlen(p);
+        n = ok ? read_raw_reply(s2, raw, sizeof(raw)) : -1;
+        int in_order = n > 0 && raw[0] == '*' && strstr(raw, "tc:resp3:pin2");
+        n = ok ? read_raw_reply(s2, raw, sizeof(raw)) : -1;
+        in_order = in_order && n > 0 && !strncmp(raw, "-ERR Can't execute 'dbsize'", 27);
+        n = ok ? read_raw_reply(s2, raw, sizeof(raw)) : -1;
+        CHECK(in_order && n > 0 && !strcmp(raw, "*2\r\n$4\r\npong\r\n$0\r\n\r\n"),
+              "RESP2 subscriber on a RESP3 sub_conn: pipelined refusal comes in order", pass, fail);
+        if (s2 >= 0) close(s2);
     }
 
     /* CLIENT LIST is a verbatim string over RESP3, like Valkey */

@@ -296,8 +296,10 @@ struct ClientConn {
     /* 1 = an unsubscribe's fence PING is in flight on sub_conn (see
      * pubsub.c): client input is held until it comes back. */
     int sub_fence_pending;
-    /* Error to send once that fence is back (a subscribed CLIENT LIST). */
-    const char *sub_fence_error;
+    /* Error to send once that fence is back, "" = none: a subscribed
+     * CLIENT LIST, or a command a RESP2 subscriber may not run (see
+     * handle_pubsub_cmd()). */
+    char sub_fence_error[256];
     /* ── CLIENT ID / GETNAME / SETNAME (see handle_client_cmd in fanout.c) ── */
     long long id;
     char name[64];
@@ -809,6 +811,7 @@ void handle_subscribed_client_list(Worker *w, ClientConn *client);
 void handle_pubsub_inspect_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_slowlog_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_commandlog_cmd(Worker *w, ClientConn *client, int cmdlen);
+void handle_hotkeys_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_module_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_script_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_function_cmd(Worker *w, ClientConn *client, int cmdlen);

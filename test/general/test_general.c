@@ -6,7 +6,7 @@ typedef struct {
     int ok;
     const char *label;
 } _GnRes;
-#define _GN_MAX 256
+#define _GN_MAX 512
 
 #undef CHECK
 #define CHECK(cond, _lbl, pass, fail) \
@@ -69,6 +69,89 @@ static char *send_big_set(int fd, const char *key, size_t len, char *out, int ou
         return NULL;
     }
     return resp_next_str(fd, out, outsz);
+}
+
+/* The distinct backend addresses ("ip:port") the proxy has pools for, read
+ * from the "_normal:addr=" lines of PROXY POOLS. Returns how many were found
+ * (at most max), or -1 on error. */
+static int pools_backend_addrs(int fd, char addrs[][64], int max) {
+    const int cap = 1 << 20;
+    char *buf = malloc((size_t)cap);
+    if (!buf) return -1;
+    int n = resp_send_raw_reply(fd, buf, cap, 2, "PROXY", "POOLS");
+    if (n <= 0 || buf[0] != '$') {
+        free(buf);
+        return -1;
+    }
+    int cnt = 0;
+    static const char tag[] = "_normal:addr=";
+    for (char *p = strstr(buf, tag); p && cnt < max; p = strstr(p + 1, tag)) {
+        char a[64];
+        if (sscanf(p + sizeof(tag) - 1, "%63[^,\r\n]", a) != 1) continue;
+        int dup = 0;
+        for (int i = 0; i < cnt; i++)
+            if (!strcmp(addrs[i], a)) dup = 1;
+        if (!dup) snprintf(addrs[cnt++], 64, "%s", a);
+    }
+    free(buf);
+    return cnt;
+}
+
+/* Runs one command directly against the backend at addr ("ip:port") and
+ * returns its reply's first token in out (see resp_next_str()), or NULL if
+ * the backend can't be reached. CONFIG GET's *2 reply is reduced to its
+ * value. */
+static char *backend_cmd(const char *addr, char *out, int outsz, int argc, const char **args) {
+    char host[64];
+    int port;
+    if (sscanf(addr, "%63[^:]:%d", host, &port) != 2) return NULL;
+    int bfd = proxy_connect(host, port);
+    if (bfd < 0) return NULL;
+    int arglens[16];
+    for (int i = 0; i < argc; i++) arglens[i] = (int)strlen(args[i]);
+    char *got = resp_send_raw(bfd, argc, args, arglens) == 0 ? resp_next_str(bfd, out, outsz) : NULL;
+    if (got && !strcmp(out, "*2")) { /* CONFIG GET name -> [name, value] */
+        resp_next_str(bfd, out, outsz);
+        got = resp_next_str(bfd, out, outsz);
+    }
+    close(bfd);
+    return got;
+}
+
+/* One entry of a HOTKEYS GET reply: hdr is "*6" (RESP2) or "%3" (RESP3). */
+typedef struct {
+    char key[64];
+    long long db, qps;
+} HotkeyRow;
+
+/* Parses a raw HOTKEYS GET reply whose entries all start with hdr into rows.
+ * Returns the entry count, or -1 if the reply or any entry has another
+ * shape. */
+static int parse_hotkeys_reply(const char *buf, int len, const char *hdr, HotkeyRow *rows, int max) {
+    if (len < 4 || buf[0] != '*') return -1;
+    int n = atoi(buf + 1);
+    const char *p = strstr(buf, "\r\n");
+    if (!p) return -1;
+    p += 2;
+    char want[16];
+    snprintf(want, sizeof(want), "%s\r\n$3\r\nkey\r\n$", hdr);
+    for (int i = 0; i < n; i++) {
+        if (strncmp(p, want, strlen(want))) return -1;
+        p += strlen(want);
+        int klen = atoi(p);
+        p = strstr(p, "\r\n") + 2;
+        HotkeyRow row = {0};
+        snprintf(row.key, sizeof(row.key), "%.*s", klen < 63 ? klen : 63, p);
+        p += klen + 2;
+        if (strncmp(p, "$2\r\ndb\r\n:", 9)) return -1;
+        row.db = atoll(p + 9);
+        p = strstr(p + 9, "\r\n") + 2;
+        if (strncmp(p, "$3\r\nqps\r\n:", 10)) return -1;
+        row.qps = atoll(p + 10);
+        p = strstr(p + 10, "\r\n") + 2;
+        if (i < max) rows[i] = row;
+    }
+    return p == buf + len ? n : -1;
 }
 
 /* Sum every "<field><number>" occurrence in a PROXY POOLS reply. */
@@ -734,6 +817,115 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
     {
         const char *types[] = {"slow", "large-request", "large-reply"};
         for (int i = 0; i < 3; i++) proxy_cmd(fd, r, sizeof(r), 3, "COMMANDLOG", "RESET", types[i]);
+    }
+
+    /* ── HOTKEYS ─────────────────────────────────────────────────────── */
+    /* HOTKEYS HELP has no key — routed to a single master node */
+    resp_send(fd, 2, "HOTKEYS", "HELP");
+    resp_next_str(fd, r, sizeof(r)); /* *N header */
+    CHECK(r[0] == '*' && atoi(r + 1) > 0, "HOTKEYS HELP: returns non-empty help array", pass, fail);
+    {
+        int n = r[0] == '*' ? atoi(r + 1) : 0;
+        for (int i = 0; i < n; i++) resp_next_str(fd, r, sizeof(r));
+    }
+    resp_send(fd, 2, "hotkeys", "help");
+    resp_next_str(fd, r, sizeof(r));
+    CHECK(r[0] == '*' && atoi(r + 1) > 0, "hotkeys help: subcommand is case-insensitive", pass, fail);
+    {
+        int n = r[0] == '*' ? atoi(r + 1) : 0;
+        for (int i = 0; i < n; i++) resp_next_str(fd, r, sizeof(r));
+    }
+
+    /* HOTKEYS RESET fans out to all master nodes, replies +OK; GET right
+     * after it has nothing to report on any node. */
+    proxy_cmd(fd, r, sizeof(r), 2, "HOTKEYS", "RESET");
+    CHECK(strcmp(r, "+OK") == 0, "HOTKEYS RESET: returns +OK", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "HOTKEYS", "GET");
+    CHECK(strcmp(r, "*0") == 0, "HOTKEYS GET: returns empty array after RESET", pass, fail);
+
+    /* GET/RESET are forwarded verbatim: the backend's arity error is relayed */
+    proxy_cmd(fd, r, sizeof(r), 3, "HOTKEYS", "GET", "10");
+    CHECK(r[0] == '-' && strstr(r, "hotkeys|get"), "HOTKEYS GET 10: relays backend arity error", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 3, "HOTKEYS", "RESET", "x");
+    CHECK(r[0] == '-' && strstr(r, "hotkeys|reset"), "HOTKEYS RESET x: relays backend arity error", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 1, "HOTKEYS");
+    CHECK(strstr(r, "missing HOTKEYS subcommand") != NULL, "HOTKEYS: missing subcommand error", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "HOTKEYS", "NOSUCH");
+    CHECK(strstr(r, "unknown HOTKEYS subcommand") != NULL, "HOTKEYS NOSUCH: unknown subcommand error", pass, fail);
+
+    /* HOTKEYS GET merge across nodes. Detection is off by default
+     * (hotkeys-top-k 0), and CONFIG doesn't go through the proxy, so it is
+     * turned on directly on every backend PROXY POOLS lists, then restored.
+     * The three keys share a hash tag with tc:gn:touch:k1/k3/k2, which live on
+     * Node 0/1/2 (see the SLOWLOG test above), and are read 3:2:1 so their
+     * qps orders them Node 0, Node 1, Node 2. */
+    {
+        static const char *params[] = {"hotkeys-top-k", "hotkeys-sampling-percentage", "hotkeys-window-seconds"};
+        static const char *on[] = {"32", "100", "1"};
+        char addrs[16][64], orig[16][3][32];
+        int naddr = pools_backend_addrs(fd, addrs, 16), set = 0, ok = naddr > 0;
+        for (int i = 0; ok && i < naddr; i++)
+            for (int j = 0; ok && j < 3; j++) {
+                const char *get[] = {"CONFIG", "GET", params[j]};
+                ok = backend_cmd(addrs[i], orig[i][j], sizeof(orig[i][j]), 3, get) && orig[i][j][0] != '-' &&
+                     orig[i][j][0] != '*';
+            }
+        for (; ok && set < naddr; set++) {
+            const char *cs[] = {"CONFIG", "SET", params[0], on[0], params[1], on[1], params[2], on[2]};
+            ok = backend_cmd(addrs[set], r, sizeof(r), 8, cs) && !strcmp(r, "+OK");
+        }
+
+        if (!ok) {
+            printf("  [SKIP] HOTKEYS GET merge (backends not directly reachable, or older than Valkey 9.2)\n");
+        } else {
+            const char *keys[3] = {"{tc:gn:touch:k1}:hot", "{tc:gn:touch:k3}:hot", "{tc:gn:touch:k2}:hot"};
+            /* >2 windows of traffic, so the last completed one is all load */
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            do {
+                for (int k = 0; k < 3; k++)
+                    for (int rep = 0; rep < 3 - k; rep++) proxy_cmd(fd, r, sizeof(r), 2, "GET", keys[k]);
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+            } while ((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < 2300);
+
+            const int cap = 1 << 16;
+            char *raw = malloc((size_t)cap);
+            HotkeyRow rows[64];
+            int len = raw ? resp_send_raw_reply(fd, raw, cap, 2, "HOTKEYS", "GET") : -1;
+            int n = len > 0 ? parse_hotkeys_reply(raw, len, "*6", rows, 64) : -1;
+            CHECK(n >= 3, "HOTKEYS GET: every entry is a *6 key/db/qps array", pass, fail);
+            int ordered = n > 0, pos[3] = {-1, -1, -1};
+            for (int i = 0; i < n && i < 64; i++) {
+                if (i > 0 && rows[i].qps > rows[i - 1].qps) ordered = 0;
+                for (int k = 0; k < 3; k++)
+                    if (!strcmp(rows[i].key, keys[k]) && rows[i].db == 0) pos[k] = i;
+            }
+            CHECK(ordered, "HOTKEYS GET: merged entries ordered by qps descending", pass, fail);
+            CHECK(pos[0] >= 0 && pos[1] >= 0 && pos[2] >= 0, "HOTKEYS GET: has the hot key of each of the 3 nodes",
+                  pass, fail);
+            CHECK(pos[0] >= 0 && pos[0] < pos[1] && pos[1] < pos[2],
+                  "HOTKEYS GET: keys from different nodes ordered by their qps", pass, fail);
+
+            /* RESP3: each entry is a %3 map */
+            int fd3 = proxy_connect(host, port);
+            if (fd3 >= 0 && raw) resp_send_raw_reply(fd3, raw, cap, 2, "HELLO", "3");
+            len = fd3 >= 0 && raw ? resp_send_raw_reply(fd3, raw, cap, 2, "HOTKEYS", "GET") : -1;
+            n = len > 0 ? parse_hotkeys_reply(raw, len, "%3", rows, 64) : -1;
+            CHECK(n >= 3, "HOTKEYS GET (RESP3): every entry is a %3 key/db/qps map", pass, fail);
+            if (fd3 >= 0) close(fd3);
+            free(raw);
+
+            proxy_cmd(fd, r, sizeof(r), 2, "HOTKEYS", "RESET");
+            CHECK(strcmp(r, "+OK") == 0, "HOTKEYS RESET: +OK with detection on", pass, fail);
+            proxy_cmd(fd, r, sizeof(r), 2, "HOTKEYS", "GET");
+            CHECK(strcmp(r, "*0") == 0, "HOTKEYS GET: empty again after RESET", pass, fail);
+        }
+
+        /* restore every backend that was changed */
+        for (int i = 0; i < set; i++) {
+            const char *cs[] = {"CONFIG", "SET", params[0], orig[i][0], params[1], orig[i][1], params[2], orig[i][2]};
+            backend_cmd(addrs[i], r, sizeof(r), 8, cs);
+        }
     }
 
     /* ── TIME ────────────────────────────────────────────────────────── */

@@ -93,6 +93,7 @@ static const char *NON_TXN_CMDS[] = {"ACL",
                                      "HLEN",
                                      "HMGET",
                                      "HMSET",
+                                     "HOTKEYS",
                                      "HPERSIST",
                                      "HPEXPIRE",
                                      "HPEXPIREAT",
@@ -388,11 +389,11 @@ static const char *FANOUT_CMDS[] = {"DEL",  "EXISTS", "JSON.MGET", "JSON.MSET", 
 /* Commands not routed by key slot: answered by the proxy itself, broadcast
  * to every primary, or forwarded to an arbitrary node. Some take arguments
  * that look like keys (e.g. CLUSTER KEYSLOT) but are never used for routing. */
-static const char *NO_SLOT_CMDS[] = {"CLIENT",   "CLUSTER",   "COMMAND",  "COMMANDLOG",   "DBSIZE",    "ECHO",
-                                     "FLUSHALL", "FLUSHDB",   "FT._LIST", "FT.AGGREGATE", "FT.CREATE", "FT.DROPINDEX",
-                                     "FT.INFO",  "FT.SEARCH", "FUNCTION", "HELLO",        "INFO",      "KEYS",
-                                     "LOLWUT",   "MODULE",    "PING",     "PROXY",        "PUBSUB",    "RANDOMKEY",
-                                     "SCAN",     "SCRIPT",    "SELECT",   "SLOWLOG",      "TIME",      NULL};
+static const char *NO_SLOT_CMDS[] = {
+    "CLIENT",    "CLUSTER",      "COMMAND",   "COMMANDLOG",   "DBSIZE",  "ECHO",      "FLUSHALL", "FLUSHDB",
+    "FT._LIST",  "FT.AGGREGATE", "FT.CREATE", "FT.DROPINDEX", "FT.INFO", "FT.SEARCH", "FUNCTION", "HELLO",
+    "HOTKEYS",   "INFO",         "KEYS",      "LOLWUT",       "MODULE",  "PING",      "PROXY",    "PUBSUB",
+    "RANDOMKEY", "SCAN",         "SCRIPT",    "SELECT",       "SLOWLOG", "TIME",      NULL};
 
 /* Commands whose RESP2 reply has a nil *array* rather than a nil bulk
  * string somewhere in it -- see resp3_downgrade()'s nil_array_depth
@@ -449,9 +450,9 @@ int cmd_resp3_pair_transform(const char *cmd) {
 /* Commands whose first argument is a subcommand rather than a data key (see
  * resp_parse_header()'s "key" = arg[1] convention) -- used to format the
  * CLIENT INFO "cmd" field as "cmd|subcommand", matching real Redis/Valkey. */
-static const char *CONTAINER_CMDS[] = {"ACL",     "CLIENT", "CLUSTER", "COMMAND", "COMMANDLOG", "FUNCTION",
-                                       "MEMORY",  "MODULE", "OBJECT",  "PROXY",   "PUBSUB",     "SCRIPT",
-                                       "SLOWLOG", "XGROUP", "XINFO",   NULL};
+static const char *CONTAINER_CMDS[] = {"ACL",     "CLIENT",  "CLUSTER", "COMMAND", "COMMANDLOG", "FUNCTION",
+                                       "HOTKEYS", "MEMORY",  "MODULE",  "OBJECT",  "PROXY",      "PUBSUB",
+                                       "SCRIPT",  "SLOWLOG", "XGROUP",  "XINFO",   NULL};
 
 /* Records this command as the client's most recent one (see the "cmd" field
  * of CLIENT INFO, format_client_info_line() in fanout.c). */
