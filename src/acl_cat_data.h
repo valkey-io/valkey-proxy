@@ -533,6 +533,8 @@ static const char *ACL_CAT_ADMIN[] = {
     "acl|getuser",
     "acl|users",
     "acl|list",
+    "config|get",
+    "config|set",
     NULL};
 
 static const char *ACL_CAT_FAST[] = {
@@ -874,6 +876,8 @@ static const char *ACL_CAT_SLOW[] = {
     "phpathdel",
     "FT.HYBRID",
     "FT.CURSOR",
+    "config|get",
+    "config|set",
     NULL};
 
 static const char *ACL_CAT_BLOCKING[] = {
@@ -911,6 +915,8 @@ static const char *ACL_CAT_DANGEROUS[] = {
     "acl|getuser",
     "acl|users",
     "acl|list",
+    "config|get",
+    "config|set",
     NULL};
 
 static const char *ACL_CAT_CONNECTION[] = {

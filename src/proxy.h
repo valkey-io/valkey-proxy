@@ -547,6 +547,9 @@ typedef struct {
      * subcommand, read-only users GET and HELP. Empty = nobody. */
     char proxy_config_admin_users[1024];
     char proxy_config_readonly_users[1024];
+    /* 1 = CONFIG GET/SET are sent to every primary (see handle_config_cmd()
+     * in src/fanout.c); 0 = CONFIG is refused. Settable at runtime. */
+    int config_command_enable;
 } Config;
 
 /* ── globals ────────────────────────────────────────────────────────── */
@@ -732,6 +735,7 @@ void mux_conn_readable(Worker *w, PoolConn *conn);
 PoolType cmd_get_pool_type(const char *cmd);
 int cmd_in_list(const char *cmd, const char **list);
 int cmd_is_supported(const char *cmd);
+int cmd_subcmd_supported(const char *cmd, const char *sub, int sublen);
 void str_toupper(char *s);
 PoolType route_command(ClientConn *client, const char *cmd);
 CmdClass classify_command(const char *cmd, PoolType pt);
@@ -812,6 +816,8 @@ void handle_pubsub_inspect_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_slowlog_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_commandlog_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_hotkeys_cmd(Worker *w, ClientConn *client, int cmdlen);
+void handle_config_cmd(Worker *w, ClientConn *client, int cmdlen);
+void config_command_log(int on);
 void handle_module_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_script_cmd(Worker *w, ClientConn *client, int cmdlen);
 void handle_function_cmd(Worker *w, ClientConn *client, int cmdlen);

@@ -422,6 +422,87 @@ void run_proxy_config_tests(const char *host, int port, int *pass, int *fail) {
         printf("  [SKIP] SAVE <file> contents (%s isn't readable here: proxy on another host?)\n", path);
     }
 
+    /* ── config-command-enable: CONFIG GET / SET sent to every primary ── */
+    int orig_cce = proxy_config_get_int(fd, "config-command-enable");
+    CHECK(orig_cce == 0 || orig_cce == 1, "GET config-command-enable: 0 or 1", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 5, "PROXY", "CONFIG", "SET", "config-command-enable", "2");
+    CHECK(strstr(r, "argument must be between 0 and 1") != NULL, "SET config-command-enable 2: refused", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 5, "PROXY", "CONFIG", "SET", "config-command-enable", "0");
+    CHECK(strcmp(r, "+OK") == 0, "SET config-command-enable 0: +OK", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 3, "CONFIG", "GET", "maxmemory-policy");
+    CHECK(strstr(r, "CONFIG is disabled") != NULL, "CONFIG GET while config-command-enable is 0: refused", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 4, "CONFIG", "SET", "maxmemory-policy", "noeviction");
+    CHECK(strstr(r, "CONFIG is disabled") != NULL, "CONFIG SET while config-command-enable is 0: refused", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 5, "PROXY", "CONFIG", "SET", "config-command-enable", "1");
+    CHECK(strcmp(r, "+OK") == 0 && proxy_config_get_int(fd, "config-command-enable") == 1,
+          "SET config-command-enable 1: +OK", pass, fail);
+
+    /* every primary has the same maxmemory-policy: its value is relayed */
+    char policy[64] = "";
+    n = resp_send_raw_reply(fd, big, cap, 3, "CONFIG", "GET", "maxmemory-policy");
+    if (n > 0 && !strncmp(big, "*2\r\n$16\r\nmaxmemory-policy\r\n$", 28)) {
+        const char *v = strstr(big + 28, "\r\n");
+        if (v) sscanf(v + 2, "%63[^\r]", policy);
+    }
+    CHECK(policy[0] != '\0', "CONFIG GET maxmemory-policy: one name/value pair", pass, fail);
+    n = resp_send_raw_reply(fd, big, cap, 4, "CONFIG", "GET", "maxmemory-policy", "maxmemory");
+    CHECK(n > 0 && !strncmp(big, "*4\r\n", 4) && strstr(big, "maxmemory-policy") && strstr(big, "\r\nmaxmemory\r\n"),
+          "CONFIG GET with two patterns: both pairs", pass, fail);
+    n = resp_send_raw_reply(fd, big, cap, 3, "CONFIG", "GET", "tc-no-such-param");
+    CHECK(n > 0 && !strncmp(big, "*0\r\n", 4), "CONFIG GET of an unknown name: empty array", pass, fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "CONFIG", "GET");
+    CHECK(strstr(r, "wrong number of arguments") != NULL, "CONFIG GET without a pattern: the backends' arity error",
+          pass, fail);
+
+    /* bind / port tell the nodes apart: on separate hosts bind differs, on
+     * one host the port does */
+    {
+        int masters = 0;
+        n = resp_send_raw_reply(fd, big, cap, 2, "CLUSTER", "SLOTS");
+        if (n > 0 && big[0] == '*') masters = atoi(big + 1);
+        if (masters >= 2) {
+            proxy_cmd(fd, r, sizeof(r), 4, "CONFIG", "GET", "bind", "port");
+            CHECK(strcmp(r, "-ERR all responses not same") == 0,
+                  "CONFIG GET bind port: nodes differ, all responses not same", pass, fail);
+        } else {
+            SKIP("CONFIG GET with differing replies (needs 2+ primaries)");
+        }
+    }
+
+    /* SET to the value it already has, so the backends are left as they were */
+    if (policy[0]) {
+        proxy_cmd(fd, r, sizeof(r), 4, "CONFIG", "SET", "maxmemory-policy", policy);
+        CHECK(strcmp(r, "+OK") == 0, "CONFIG SET maxmemory-policy <current value>: +OK from every primary", pass, fail);
+    }
+    proxy_cmd(fd, r, sizeof(r), 4, "CONFIG", "SET", "tc-no-such-param", "1");
+    CHECK(r[0] == '-' && strstr(r, "tc-no-such-param"), "CONFIG SET of an unknown name: the backend's error", pass,
+          fail);
+    proxy_cmd(fd, r, sizeof(r), 2, "CONFIG", "RESETSTAT");
+    CHECK(strcmp(r, "-ERR unsupport command") == 0, "CONFIG RESETSTAT: still unsupported", pass, fail);
+
+    /* a transaction is bound to one node, CONFIG to every primary */
+    proxy_cmd(fd, r, sizeof(r), 1, "MULTI");
+    proxy_cmd(fd, r, sizeof(r), 3, "CONFIG", "GET", "maxmemory-policy");
+    CHECK(strcmp(r, "-ERR Command not allowed inside a transaction") == 0, "CONFIG GET inside MULTI: refused", pass,
+          fail);
+    proxy_cmd(fd, r, sizeof(r), 1, "EXEC");
+    CHECK(strncmp(r, "-EXECABORT", 10) == 0, "EXEC after CONFIG inside MULTI: -EXECABORT", pass, fail);
+
+    /* RESP3: the pairs come back as a map */
+    {
+        int f3 = proxy_connect(host, port);
+        n = resp_send_raw_reply(f3, big, cap, 5, "HELLO", "3", "AUTH", g_test_acl_user, g_test_acl_pass);
+        n = resp_send_raw_reply(f3, big, cap, 3, "CONFIG", "GET", "maxmemory-policy");
+        CHECK(n > 0 && !strncmp(big, "%1\r\n", 4) && strstr(big, "maxmemory-policy"),
+              "CONFIG GET over RESP3: a one-entry map", pass, fail);
+        close(f3);
+    }
+
+    snprintf(val, sizeof(val), "%d", orig_cce);
+    proxy_cmd(fd, r, sizeof(r), 5, "PROXY", "CONFIG", "SET", "config-command-enable", val);
+    CHECK(strcmp(r, "+OK") == 0 && proxy_config_get_int(fd, "config-command-enable") == orig_cce,
+          "SET config-command-enable: original value restored", pass, fail);
+
     /* ── put everything back ──────────────────────────────────────────── */
     char s1[16], s2[16], s3[16], s4[16];
     snprintf(s1, sizeof(s1), "%d", orig_inflight);

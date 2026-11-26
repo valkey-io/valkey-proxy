@@ -997,12 +997,14 @@ static void client_process_input(Worker *w, ClientConn *client) {
      * doesn't wait for the last argument's bytes -- read until the whole
      * (always small) command is in hbuf before dispatching it. PROXY and
      * INFO parse all their arguments from hbuf too, so they need the same,
-     * and so does CLIENT (CLIENT LIST's filters), and ACL CAT (its category). */
+     * and so does CLIENT (CLIENT LIST's filters), and ACL CAT (its category).
+     * CONFIG GET/SET are forwarded whole from hbuf to every primary. */
     /* A multiplexed single-key command is likewise sent whole from hbuf
      * (client_can_mux() made sure it fits), and so is every command bound
      * for a subscription connection (handle_pubsub_cmd()). */
     int need_whole = !strcmp(cmd, "HELLO") || !strcmp(cmd, "PROXY") || !strcmp(cmd, "INFO") || !strcmp(cmd, "CLIENT") ||
-                     !strcmp(cmd, "CLUSTER") || (client->mux_cmd && cls == CMD_CLASS_SINGLE_KEY) ||
+                     !strcmp(cmd, "CLUSTER") || !strcmp(cmd, "CONFIG") ||
+                     (client->mux_cmd && cls == CMD_CLASS_SINGLE_KEY) ||
                      (!strcmp(cmd, "ACL") && keylen == 3 && !strncasecmp(key, "CAT", 3)) || cls == CMD_CLASS_PUBSUB;
     if (need_whole && client->hbuf_len < total_cmd_len) {
         /* Too big to hold: reply with an error and skip the command's

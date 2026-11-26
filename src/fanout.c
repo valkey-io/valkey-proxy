@@ -581,6 +581,121 @@ static char *fanout_agg_hotkeys_get(FanoutCtx *ctx, int *out_len) {
     return out;
 }
 
+/* CONFIG GET: every primary must answer the same. A node lists the matching
+ * parameters in its own config-dict order, so each reply is compared as a
+ * set of name/value pairs rather than byte for byte; the first node's reply
+ * is then relayed (as a map for a RESP3 client). Errors count as answers
+ * too: the same error from every node is relayed, otherwise -- or when any
+ * node's reply differs -- the client gets "all responses not same". */
+typedef struct {
+    const char *name;
+    int name_len;
+    const char *val;
+    int val_len;
+} ConfigPair;
+
+static int config_pair_cmp(const void *a, const void *b) {
+    const ConfigPair *x = a, *y = b;
+    int n = x->name_len < y->name_len ? x->name_len : y->name_len;
+    int c = memcmp(x->name, y->name, (size_t)n);
+    return c ? c : x->name_len - y->name_len;
+}
+
+/* Splits a RESP2 CONFIG GET reply (a flat name, value, ... array) into
+ * malloc'd pairs sorted by name; each name/value is its raw RESP element.
+ * Returns the pair count, or -1 if buf isn't such an array. */
+static int config_get_pairs(const char *buf, int len, ConfigPair **out) {
+    *out = NULL;
+    if (len < 4 || buf[0] != '*') return -1;
+    int cnt = atoi(buf + 1);
+    const char *nl = memchr(buf, '\n', (size_t)len);
+    if (cnt < 0 || cnt % 2 || !nl) return -1;
+    int npairs = cnt / 2;
+    ConfigPair *pairs = malloc(sizeof(ConfigPair) * (size_t)(npairs ? npairs : 1));
+    if (!pairs) return -1;
+    int off = (int)(nl - buf) + 1;
+    for (int i = 0; i < npairs; i++) {
+        int nlen = resp_response_len(buf + off, len - off);
+        if (nlen <= 0) goto bad;
+        int vlen = resp_response_len(buf + off + nlen, len - off - nlen);
+        if (vlen <= 0) goto bad;
+        pairs[i] = (ConfigPair){buf + off, nlen, buf + off + nlen, vlen};
+        off += nlen + vlen;
+    }
+    if (off != len) goto bad;
+    qsort(pairs, (size_t)npairs, sizeof(ConfigPair), config_pair_cmp);
+    *out = pairs;
+    return npairs;
+bad:
+    free(pairs);
+    return -1;
+}
+
+static char *fanout_agg_config_get(FanoutCtx *ctx, int *out_len) {
+    static const char not_same[] = "-ERR all responses not same\r\n";
+    static const char failed[] = "-ERR fan-out backend error\r\n";
+    const char *err = NULL;
+    for (int i = 0; i < ctx->nsubs; i++) {
+        FanoutSub *s = &ctx->subs[i];
+        if (s->error || !s->rbuf || s->rbuf_len < 1) {
+            err = failed;
+            break;
+        }
+    }
+    FanoutSub *first = &ctx->subs[0];
+    if (!err && first->rbuf[0] == '-') {
+        /* the same error from every node (e.g. wrong arity, NOPERM) is
+         * relayed as is */
+        for (int i = 1; i < ctx->nsubs && !err; i++) {
+            FanoutSub *s = &ctx->subs[i];
+            if (s->rbuf_len != first->rbuf_len || memcmp(s->rbuf, first->rbuf, (size_t)s->rbuf_len)) err = not_same;
+        }
+        if (!err) {
+            char *r = malloc((size_t)first->rbuf_len);
+            if (!r) return NULL;
+            memcpy(r, first->rbuf, (size_t)first->rbuf_len);
+            *out_len = first->rbuf_len;
+            return r;
+        }
+    }
+    ConfigPair *base = NULL;
+    int nbase = -1;
+    if (!err) {
+        nbase = config_get_pairs(first->rbuf, first->rbuf_len, &base);
+        if (nbase < 0) err = not_same;
+    }
+    for (int i = 1; i < ctx->nsubs && !err; i++) {
+        ConfigPair *pairs;
+        int n = config_get_pairs(ctx->subs[i].rbuf, ctx->subs[i].rbuf_len, &pairs);
+        if (n != nbase) err = not_same;
+        for (int j = 0; j < n && !err; j++)
+            if (pairs[j].name_len != base[j].name_len || pairs[j].val_len != base[j].val_len ||
+                memcmp(pairs[j].name, base[j].name, (size_t)base[j].name_len) ||
+                memcmp(pairs[j].val, base[j].val, (size_t)base[j].val_len))
+                err = not_same;
+        free(pairs);
+    }
+    free(base);
+    if (err) {
+        char *r = strdup(err);
+        if (r) *out_len = (int)strlen(err);
+        return r;
+    }
+
+    /* RESP2: the first node's reply as is; RESP3: the same pairs as a map */
+    const char *nl = memchr(first->rbuf, '\n', (size_t)first->rbuf_len);
+    int body = (int)(nl - first->rbuf) + 1;
+    char hdr[32];
+    int hl = ctx->client->resp == 3 ? snprintf(hdr, sizeof(hdr), "%%%d\r\n", nbase)
+                                    : snprintf(hdr, sizeof(hdr), "*%d\r\n", nbase * 2);
+    char *r = malloc((size_t)(hl + first->rbuf_len - body));
+    if (!r) return NULL;
+    memcpy(r, hdr, (size_t)hl);
+    memcpy(r + hl, first->rbuf + body, (size_t)(first->rbuf_len - body));
+    *out_len = hl + first->rbuf_len - body;
+    return r;
+}
+
 static char *fanout_agg_mget(FanoutCtx *ctx, int *out_len) {
     int total = ctx->total_keys;
     char hdr[32];
@@ -997,13 +1112,121 @@ static char *fanout_agg_function_stats(Worker *w, FanoutCtx *ctx, int *out_len) 
  * far below this, so it's never actually hit. */
 #define CMD_INFO_MAX_ENTRIES 2048
 
+/* name is a command ("config") or a subcommand ("config|get"): a subcommand
+ * needs its container supported and itself in cmd_subcmd_supported(). */
 static int command_info_name_supported(const char *name, int namelen) {
     char buf[64];
-    int n = namelen < 63 ? namelen : 63;
+    const char *bar = memchr(name, '|', (size_t)namelen);
+    int clen = bar ? (int)(bar - name) : namelen;
+    int n = clen < 63 ? clen : 63;
     memcpy(buf, name, (size_t)n);
     buf[n] = '\0';
     for (int i = 0; buf[i]; i++) buf[i] = (char)toupper((unsigned char)buf[i]);
-    return cmd_is_supported(buf);
+    if (!cmd_is_supported(buf)) return 0;
+    return !bar || cmd_subcmd_supported(buf, bar + 1, namelen - clen - 1);
+}
+
+/* Copies the RESP2 array src (n elements) to a malloc'd buffer with element
+ * idx replaced by rep[0..rep_len). NULL on a malformed src or no memory. */
+static char *resp_array_replace(const char *src, int len, int n, int idx, const char *rep, int rep_len, int *out_len) {
+    *out_len = 0;
+    int el;
+    const char *e = resp_array_nth(src, len, idx, &el);
+    if (!e) return NULL;
+    char *out = malloc((size_t)(len - el + rep_len));
+    if (!out) return NULL;
+    (void)n;
+    int head = (int)(e - src), tail = len - head - el;
+    memcpy(out, src, (size_t)head);
+    memcpy(out + head, rep, (size_t)rep_len);
+    memcpy(out + head + rep_len, e + el, (size_t)tail);
+    *out_len = head + rep_len + tail;
+    return out;
+}
+
+/* Keeps the elements of the RESP2 array arr whose name is supported: with
+ * pairs, arr is a flat name, value, ... array (COMMAND DOCS' subcommands);
+ * without, each element is an array whose first element is the name
+ * (COMMAND INFO's subcommands). Returns a malloc'd array, or NULL when
+ * nothing is dropped (or on a malformed arr / no memory). */
+static char *subcmds_filter(const char *arr, int len, int pairs, int *out_len) {
+    *out_len = 0;
+    int n = arr[0] == '*' ? atoi(arr + 1) : -1;
+    int step = pairs ? 2 : 1;
+    if (n <= 0 || n % step) return NULL;
+    char *out = malloc((size_t)len + 32);
+    if (!out) return NULL;
+    int off = 32, kept = 0;
+    for (int i = 0; i < n; i += step) {
+        int el, el2 = 0, nl;
+        const char *e = resp_array_nth(arr, len, i, &el);
+        const char *e2 = pairs ? resp_array_nth(arr, len, i + 1, &el2) : NULL;
+        if (!e || (pairs && !e2)) {
+            free(out);
+            return NULL;
+        }
+        const char *name = pairs ? e : resp_array_nth(e, el, 0, &nl);
+        if (pairs) nl = el;
+        int vlen;
+        const char *v = name ? resp_parse_bulk_str(name, nl, &vlen) : NULL;
+        if (v && !command_info_name_supported(v, vlen)) continue;
+        memcpy(out + off, e, (size_t)el);
+        off += el;
+        if (pairs) {
+            memcpy(out + off, e2, (size_t)el2);
+            off += el2;
+        }
+        kept += step;
+    }
+    if (kept == n) {
+        free(out);
+        return NULL;
+    }
+    char hdr[32];
+    int hl = snprintf(hdr, sizeof(hdr), "*%d\r\n", kept);
+    memmove(out + hl, out + 32, (size_t)(off - 32));
+    memcpy(out, hdr, (size_t)hl);
+    *out_len = hl + off - 32;
+    return out;
+}
+
+/* A COMMAND INFO entry with its subcommands (element 9) filtered by
+ * subcmds_filter(); NULL when it keeps them all. */
+static char *command_info_entry_filter(const char *e, int el, int *out_len) {
+    *out_len = 0;
+    int n = e[0] == '*' ? atoi(e + 1) : -1;
+    int sl;
+    const char *subs = n > 9 ? resp_array_nth(e, el, 9, &sl) : NULL;
+    if (!subs) return NULL;
+    int fl;
+    char *f = subcmds_filter(subs, sl, 0, &fl);
+    if (!f) return NULL;
+    char *out = resp_array_replace(e, el, n, 9, f, fl, out_len);
+    free(f);
+    return out;
+}
+
+/* A COMMAND DOCS doc map (flat key, value, ... array) with its
+ * "subcommands" value filtered by subcmds_filter(); NULL when it keeps
+ * them all. */
+static int resp_bulk_equals(const char *e, int el, const char *key);
+static char *command_docs_entry_filter(const char *d, int dl, int *out_len) {
+    *out_len = 0;
+    int n = d[0] == '*' ? atoi(d + 1) : -1;
+    for (int i = 0; i + 1 < n; i += 2) {
+        int kl, vl;
+        const char *k = resp_array_nth(d, dl, i, &kl);
+        const char *v = resp_array_nth(d, dl, i + 1, &vl);
+        if (!k || !v) return NULL;
+        if (!resp_bulk_equals(k, kl, "subcommands")) continue;
+        int fl;
+        char *f = subcmds_filter(v, vl, 1, &fl);
+        if (!f) return NULL;
+        char *out = resp_array_replace(d, dl, n, i + 1, f, fl, out_len);
+        free(f);
+        return out;
+    }
+    return NULL;
 }
 
 static char *command_info_build_array(const char **elems, const int *elem_lens, int n, int *out_len) {
@@ -1049,8 +1272,9 @@ static char *fanout_agg_command_info_all(FanoutCtx *ctx, int *out_len) {
     if (n > CMD_INFO_MAX_ENTRIES) n = CMD_INFO_MAX_ENTRIES;
 
     const char *elems[CMD_INFO_MAX_ENTRIES];
-    int elem_lens[CMD_INFO_MAX_ENTRIES];
-    int kept = 0;
+    int elem_lens[CMD_INFO_MAX_ENTRIES] = {0};
+    char *owned[CMD_INFO_MAX_ENTRIES];
+    int kept = 0, nowned = 0;
     for (int i = 0; i < n; i++) {
         int elen;
         const char *elem = resp_array_nth(s->rbuf, s->rbuf_len, i, &elen);
@@ -1060,12 +1284,21 @@ static char *fanout_agg_command_info_all(FanoutCtx *ctx, int *out_len) {
         int vlen;
         const char *val = name ? resp_parse_bulk_str(name, nlen, &vlen) : NULL;
         if (val && command_info_name_supported(val, vlen)) {
+            int fl = 0;
+            char *f = command_info_entry_filter(elem, elen, &fl);
+            if (f) {
+                owned[nowned++] = f;
+                elem = f;
+                elen = fl;
+            }
             elems[kept] = elem;
             elem_lens[kept] = elen;
             kept++;
         }
     }
-    return command_info_build_array(elems, elem_lens, kept, out_len);
+    char *r = command_info_build_array(elems, elem_lens, kept, out_len);
+    for (int i = 0; i < nowned; i++) free(owned[i]);
+    return r;
 }
 
 /* COMMAND INFO <cmd> [<cmd> ...]: output length must equal the number of
@@ -1093,7 +1326,9 @@ static char *fanout_agg_command_info_named(FanoutCtx *ctx, int *out_len) {
 
     static const char *NIL = "*-1\r\n";
     const char *elems[CMD_INFO_MAX_ENTRIES];
-    int elem_lens[CMD_INFO_MAX_ENTRIES];
+    int elem_lens[CMD_INFO_MAX_ENTRIES] = {0};
+    char *owned[CMD_INFO_MAX_ENTRIES];
+    int nowned = 0;
     for (int i = 0; i < n; i++) {
         int elen;
         const char *elem = resp_array_nth(s->rbuf, s->rbuf_len, i, &elen);
@@ -1114,6 +1349,13 @@ static char *fanout_agg_command_info_named(FanoutCtx *ctx, int *out_len) {
         int vlen;
         const char *val = name ? resp_parse_bulk_str(name, nlen, &vlen) : NULL;
         if (val && command_info_name_supported(val, vlen)) {
+            int fl = 0;
+            char *f = command_info_entry_filter(elem, elen, &fl);
+            if (f) {
+                owned[nowned++] = f;
+                elem = f;
+                elen = fl;
+            }
             elems[i] = elem;
             elem_lens[i] = elen;
         } else {
@@ -1121,7 +1363,9 @@ static char *fanout_agg_command_info_named(FanoutCtx *ctx, int *out_len) {
             elem_lens[i] = 5;
         }
     }
-    return command_info_build_array(elems, elem_lens, n, out_len);
+    char *r = command_info_build_array(elems, elem_lens, n, out_len);
+    for (int i = 0; i < nowned; i++) free(owned[i]);
+    return r;
 }
 
 /* True if the RESP2 element e (el bytes) is a bulk string equal to key. */
@@ -1272,8 +1516,9 @@ static char *fanout_agg_command_docs(FanoutCtx *ctx, int *out_len) {
     if (n > CMD_INFO_MAX_ENTRIES) n = CMD_INFO_MAX_ENTRIES;
 
     const char *elems[CMD_INFO_MAX_ENTRIES];
-    int elem_lens[CMD_INFO_MAX_ENTRIES];
-    int kept = 0;
+    int elem_lens[CMD_INFO_MAX_ENTRIES] = {0};
+    char *owned[CMD_INFO_MAX_ENTRIES / 2];
+    int kept = 0, nowned = 0;
     for (int i = 0; i + 1 < n; i += 2) {
         int nlen;
         const char *name_elem = resp_array_nth(s->rbuf, s->rbuf_len, i, &nlen);
@@ -1283,6 +1528,13 @@ static char *fanout_agg_command_docs(FanoutCtx *ctx, int *out_len) {
         int vlen;
         const char *val = resp_parse_bulk_str(name_elem, nlen, &vlen);
         if (val && command_info_name_supported(val, vlen)) {
+            int fl = 0;
+            char *f = command_docs_entry_filter(docs_elem, dlen, &fl);
+            if (f) {
+                owned[nowned++] = f;
+                docs_elem = f;
+                dlen = fl;
+            }
             elems[kept] = name_elem;
             elem_lens[kept] = nlen;
             kept++;
@@ -1291,19 +1543,27 @@ static char *fanout_agg_command_docs(FanoutCtx *ctx, int *out_len) {
             kept++;
         }
     }
-    if (ctx->client->resp != 3) return command_info_build_array(elems, elem_lens, kept, out_len);
+    if (ctx->client->resp != 3) {
+        char *r = command_info_build_array(elems, elem_lens, kept, out_len);
+        for (int i = 0; i < nowned; i++) free(owned[i]);
+        return r;
+    }
 
     /* The re-encoded reply is never longer than the RESP2 one. */
     int total = 32;
     for (int i = 0; i < kept; i++) total += elem_lens[i];
     char *out = malloc((size_t)total);
-    if (!out) return NULL;
+    if (!out) {
+        for (int i = 0; i < nowned; i++) free(owned[i]);
+        return NULL;
+    }
     int off = snprintf(out, 32, "%%%d\r\n", kept / 2);
     for (int i = 0; i + 1 < kept; i += 2) {
         memcpy(out + off, elems[i], (size_t)elem_lens[i]);
         off += elem_lens[i];
         off += command_docs_to_resp3(elems[i + 1], elem_lens[i + 1], out + off);
     }
+    for (int i = 0; i < nowned; i++) free(owned[i]);
     *out_len = off;
     return out;
 }
@@ -1469,8 +1729,10 @@ void fanout_aggregate_and_reply(Worker *w, FanoutCtx *ctx) {
         resp = fanout_agg_slowlog_get(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "HOTKEYS_GET")) {
         resp = fanout_agg_hotkeys_get(ctx, &resp_len);
-    } else if (!strcmp(ctx->cmd, "RESET")) {
+    } else if (!strcmp(ctx->cmd, "RESET") || !strcmp(ctx->cmd, "CONFIG_SET")) {
         resp = fanout_agg_ok(ctx, &resp_len);
+    } else if (!strcmp(ctx->cmd, "CONFIG_GET")) {
+        resp = fanout_agg_config_get(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "CHANNELS")) {
         resp = fanout_agg_pubsub_channels(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "NUMPAT")) {
@@ -2671,6 +2933,41 @@ void handle_hotkeys_cmd(Worker *w, ClientConn *client, int cmdlen) {
     client->hbuf_len = 0;
 }
 
+/* CONFIG GET / SET, only while config-command-enable is 1. Both are
+ * forwarded verbatim to every primary (one per shard), so each node checks
+ * the arguments itself. SET answers +OK only if every node did, else the
+ * first node's error is relayed (the nodes that did accept it keep the new
+ * value: Valkey's CONFIG SET is all-or-nothing per node, not across them).
+ * GET answers only if every node's reply is the same, see
+ * fanout_agg_config_get(). The other subcommands stay unsupported. */
+void handle_config_cmd(Worker *w, ClientConn *client, int cmdlen) {
+    if (!__atomic_load_n(&g_config.config_command_enable, __ATOMIC_RELAXED)) {
+        client_reject_error(w, client, "CONFIG is disabled on this proxy, see config-command-enable");
+        return;
+    }
+    const char *sub;
+    int sublen;
+    const char *tag = NULL;
+    if (resp_get_nth_arg(client->hbuf, client->hbuf_len, 1, &sub, &sublen)) {
+        if (sublen == 3 && !strncasecmp(sub, "GET", 3)) tag = "CONFIG_GET";
+        if (sublen == 3 && !strncasecmp(sub, "SET", 3)) tag = "CONFIG_SET";
+    }
+    if (!tag) {
+        client_reject_error(w, client, "unsupport command");
+        return;
+    }
+    FanoutCtx *ctx = calloc(1, sizeof(FanoutCtx));
+    if (!ctx) {
+        client_send_error(w, client, "out of memory");
+        close_client(w, client);
+        return;
+    }
+    ctx->client = client;
+    snprintf(ctx->cmd, sizeof(ctx->cmd), "%s", tag);
+    client->fanout_ctx = ctx;
+    fanout_all_masters(w, client, ctx, client->hbuf, cmdlen);
+}
+
 void handle_commandlog_cmd(Worker *w, ClientConn *client, int cmdlen) {
     const char *sub;
     int sublen;
@@ -3864,6 +4161,10 @@ void handle_noslot_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdle
     }
     if (!strcmp(cmd, "HOTKEYS")) {
         handle_hotkeys_cmd(w, client, cmdlen);
+        return;
+    }
+    if (!strcmp(cmd, "CONFIG")) {
+        handle_config_cmd(w, client, cmdlen);
         return;
     }
     if (!strcmp(cmd, "MODULE")) {
