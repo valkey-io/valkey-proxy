@@ -1145,6 +1145,27 @@ void run_general_tests(const char *host, int port, int *pass, int *fail) {
         for (int i = 0; i < n; i++) resp_skip_reply(fd);
     }
 
+    /* ── only the supported subcommands of CONFIG are listed ─────────── */
+    {
+        const int cap = 1 << 16;
+        char *buf = malloc((size_t)cap);
+        int n = buf ? resp_send_raw_reply(fd, buf, cap, 3, "COMMAND", "INFO", "CONFIG") : -1;
+        CHECK(n > 0 && strstr(buf, "config|get") && strstr(buf, "config|set") && !strstr(buf, "config|resetstat") &&
+                  !strstr(buf, "config|rewrite") && !strstr(buf, "config|help"),
+              "COMMAND INFO CONFIG: lists only config|get and config|set", pass, fail);
+        n = buf ? resp_send_raw_reply(fd, buf, cap, 3, "COMMAND", "DOCS", "CONFIG") : -1;
+        CHECK(n > 0 && strstr(buf, "config|get") && strstr(buf, "config|set") && !strstr(buf, "config|resetstat") &&
+                  !strstr(buf, "config|rewrite") && !strstr(buf, "config|help"),
+              "COMMAND DOCS CONFIG: lists only config|get and config|set", pass, fail);
+        n = buf ? resp_send_raw_reply(fd, buf, cap, 4, "COMMAND", "INFO", "config|get", "config|resetstat") : -1;
+        CHECK(n > 0 && !strncmp(buf, "*2\r\n", 4) && strstr(buf, "config|get") && strstr(buf, "*-1\r\n"),
+              "COMMAND INFO config|get config|resetstat: the unsupported one is nil", pass, fail);
+        n = buf ? resp_send_raw_reply(fd, buf, cap, 3, "COMMAND", "INFO", "CLIENT") : -1;
+        CHECK(n > 0 && strstr(buf, "client|kill"), "COMMAND INFO CLIENT: other containers keep every subcommand", pass,
+              fail);
+        free(buf);
+    }
+
     /* ── COMMAND (no subcommand) ─────────────────────────────────────── */
     /* bare COMMAND has the same reply shape as COMMAND INFO with no args */
     resp_send(fd, 1, "COMMAND");

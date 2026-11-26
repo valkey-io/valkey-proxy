@@ -394,6 +394,7 @@ int main(int argc, char **argv) {
     printf("Backend multiplexing: %s  (shared connections/node=%d  max in-flight/client=%d)\n\n",
            g_config.backend_multiplexing ? "yes" : "no", g_config.shared_connection_per_node,
            g_config.max_pipeline_inflight);
+    if (g_config.config_command_enable) config_command_log(1);
 
 #ifdef USE_TLS
     if (g_config.tls_enabled && init_tls() < 0) exit(1);

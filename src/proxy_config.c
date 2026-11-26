@@ -4,8 +4,8 @@
 
 /* ── PROXY CONFIG ───────────────────────────────────────────────────────
  * Reads and changes the proxy's own proxy.conf settings at runtime, the
- * way CONFIG GET/SET does for Valkey (CONFIG itself still goes to the
- * backends):
+ * way CONFIG GET/SET does for Valkey (CONFIG itself goes to the backends,
+ * when config-command-enable is 1 -- see handle_config_cmd() in fanout.c):
  *
  *   PROXY CONFIG GET <pattern> [<pattern> ...]
  *   PROXY CONFIG SET <parameter> <value> [<parameter> <value> ...]
@@ -43,20 +43,23 @@ typedef struct {
     int min;      /* smallest value SET accepts (P_INT) */
     int pool;     /* pool type for min-/max-*-connection, else -1 */
     int pool_max; /* 1 = max-*-connection, 0 = min-*-connection */
+    int max;      /* largest value SET accepts (P_INT), 0 = no limit */
 } Param;
 
 #define RO_INT(n, p) \
-    { n, P_INT, p, 0, 0, -1, 0 }
+    { n, P_INT, p, 0, 0, -1, 0, 0 }
 #define RO_BOOL(n, p) \
-    { n, P_BOOL, p, 0, 0, -1, 0 }
+    { n, P_BOOL, p, 0, 0, -1, 0, 0 }
 #define RO_STR(n, p) \
-    { n, P_STR, p, 0, 0, -1, 0 }
+    { n, P_STR, p, 0, 0, -1, 0, 0 }
 #define RW_INT(n, p, lo) \
-    { n, P_INT, p, 1, lo, -1, 0 }
+    { n, P_INT, p, 1, lo, -1, 0, 0 }
+#define RW_FLAG(n, p) \
+    { n, P_INT, p, 1, 0, -1, 0, 1 }
 #define RW_POOL_MIN(n, pt) \
-    { n, P_INT, &g_pool_min[pt], 1, 0, pt, 0 }
+    { n, P_INT, &g_pool_min[pt], 1, 0, pt, 0, 0 }
 #define RW_POOL_MAX(n, pt) \
-    { n, P_INT, &g_pool_max[pt], 1, 1, pt, 1 }
+    { n, P_INT, &g_pool_max[pt], 1, 1, pt, 1, 0 }
 
 /* In proxy.conf order; GET answers in this order. tls-key is left out on
  * purpose. */
@@ -92,12 +95,24 @@ static const Param PARAMS[] = {
     RO_STR("reported-version", g_config.reported_version),
     RO_STR("reported-role", g_config.reported_role),
     RO_STR("reported-modules", g_config.reported_modules),
+    RW_FLAG("config-command-enable", &g_config.config_command_enable),
     RO_STR("proxy-config-admin-users", g_config.proxy_config_admin_users),
     RO_STR("proxy-config-readonly-users", g_config.proxy_config_readonly_users),
 };
 #define NPARAMS ((int)(sizeof(PARAMS) / sizeof(PARAMS[0])))
 
 static pthread_mutex_t config_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Logged when config-command-enable is turned on or off at runtime, and at
+ * startup when the config file turns it on. */
+void config_command_log(int on) {
+    if (on)
+        printf("[config] WARNING: CONFIG GET/SET enabled -- changing valkey server configuration through the proxy "
+               "may leave the shards with inconsistent configurations\n");
+    else
+        printf("[config] CONFIG GET/SET disabled -- valkey server configuration can no longer be changed through "
+               "the proxy\n");
+}
 
 static int int_load(const Param *p) {
     return __atomic_load_n((int *)p->ptr, __ATOMIC_RELAXED);
@@ -269,6 +284,12 @@ static void proxy_config_set(Worker *w, ClientConn *client) {
             set_fail(w, client, a, al, "argument must be an integer");
             goto out;
         }
+        if (p->max && (n < p->min || n > p->max)) {
+            char why[64];
+            snprintf(why, sizeof(why), "argument must be between %d and %d", p->min, p->max);
+            set_fail(w, client, a, al, why);
+            goto out;
+        }
         if (n < p->min) {
             char why[64];
             snprintf(why, sizeof(why), "argument must be %d or greater", p->min);
@@ -308,6 +329,7 @@ static void proxy_config_set(Worker *w, ClientConn *client) {
                (unsigned long long)client->id);
         if (p->pool >= 0) pools_changed = 1;
         if (p->ptr == &g_config.cluster_refresh_interval_ms && newval[i] > 0) refresh_on = 1;
+        if (p->ptr == &g_config.config_command_enable) config_command_log(newval[i]);
     }
     if (pools_changed) atomic_fetch_add_explicit(&g_pool_config_version, 1, memory_order_release);
     pthread_mutex_unlock(&config_lock);
@@ -514,6 +536,8 @@ static void proxy_config_help(Worker *w, ClientConn *client) {
         else if (p->pool >= 0)
             snprintf(buf[i], sizeof(buf[i]), "    %-32s >= %d, <= max-%s-connection", p->name, p->min,
                      POOL_NAME[p->pool]);
+        else if (p->max)
+            snprintf(buf[i], sizeof(buf[i]), "    %-32s %d..%d", p->name, p->min, p->max);
         else
             snprintf(buf[i], sizeof(buf[i]), "    %-32s >= %d", p->name, p->min);
         lines[n++] = buf[i];

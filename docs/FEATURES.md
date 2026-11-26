@@ -62,7 +62,12 @@ reply), `SLOWLOG LEN` (summed), `SLOWLOG RESET` (`+OK` only if every node succee
 merged by `qps`, highest first, and not truncated, since each node already caps its own list at its
 `hotkeys-top-k`; each entry is a `key`/`db`/`qps` map, a flat array in RESP2; needs Valkey 9.2+ backends
 with `hotkeys-top-k` above 0, otherwise empty; a key whose slot is migrating can show up once per node),
-`HOTKEYS RESET` (`+OK` only if every node succeeds), `SCRIPT KILL` (succeeds if
+`HOTKEYS RESET` (`+OK` only if every node succeeds), `CONFIG GET` / `CONFIG SET` (only while
+`config-command-enable` is 1, see §6; `GET` relays the reply only if every node answers the same
+name/value pairs, compared regardless of order, else `-ERR all responses not same`; `SET` is `+OK`
+only if every node succeeds, else a node's error, and the nodes that accepted it keep the new value; both are refused inside `MULTI`, since a transaction
+runs on one node),
+`SCRIPT KILL` (succeeds if
 **any** node succeeds), `SCRIPT FLUSH [ASYNC|SYNC]` (**the argument is ignored** — always
 rewritten as `SCRIPT FLUSH ASYNC` and broadcast, always replies `+OK`), `SCRIPT LOAD` (broadcast
 to every node so any shard's subsequent `EVALSHA` can find it; only one sha1 is relayed back),
@@ -140,6 +145,7 @@ Valkey's `CONFIG SET` wording (`can't set immutable config`, `Unknown option ...
 | `max-pipeline-inflight`, `max-multikey-payload`, `backend-connect-timeout-ms` | ≥ 1 | On the next command / connect |
 | `transaction-replay-buffer-size`, `cluster-node-fail-grace-ms` | ≥ 0 | On the next transaction / refresh cycle |
 | `cluster-refresh-interval-ms` | ≥ 0 | From the next cycle; 0 pauses refresh, and a positive value starts it if it was off at startup |
+| `config-command-enable` | 0 or 1 | On the next `CONFIG` command; each change is logged (turning it on with a warning that the shards' configurations may end up inconsistent, which is also logged at startup when the config file sets it to 1) |
 | `min-<pool>-connection` / `max-<pool>-connection` (`normal`, `blocking`, `subscription`, `transaction`, `acl`) | min ≥ 0, 1 ≤ max ≤ `max-connection`, min ≤ max | Each worker resizes its own pools as soon as it wakes: raising `min` opens connections up to it, raising `max` hands the new room to clients waiting for a connection, lowering `max` closes idle connections past it at once and busy ones as they're released |
 
 The rest (listen address, `worker-thread-no`, `max-connection`, `db`, `backend-multiplexing`,
@@ -224,6 +230,7 @@ directly affect command behavior are listed here:
 | `transaction-replay-buffer-size` | 1048576 | Most bytes of queued commands kept per transaction for replaying it on the new node after `-MOVED` (see §8); 0 disables replay |
 | `min-acl-connection` / `max-acl-connection` | 0 / 10 | `ACL`/`AUTH`, plus each authenticated client's dedicated per-node connections |
 | `cluster-refresh-interval-ms` | 500 | How often (ms) the cluster topology is refreshed in the background; 0 disables it |
+| `config-command-enable` | 0 | 1 lets clients run `CONFIG GET` / `CONFIG SET`, sent to every primary (see §3.3); 0 refuses them. Settable at runtime with `PROXY CONFIG SET` |
 | `proxy-config-admin-users` / `proxy-config-readonly-users` | unset | ACL users (after `AUTH`) who may run every `PROXY CONFIG` subcommand / only `GET` and `HELP`; unset means nobody (see §3.4) |
 | `max-connection` | 4000 | Per-worker-thread fd budget (client sockets + backend connections + listener fd(s)) |
 | `max-multikey-payload` | 67108864 (64MB) | Largest command held in full before forwarding (multi-key fan-out such as `MGET`/`MSET`/`DEL`, blocking commands, `AUTH`); a larger one gets `-ERR command too large` |

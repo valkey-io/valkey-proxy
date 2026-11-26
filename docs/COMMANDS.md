@@ -352,11 +352,11 @@ The list below covers every supported command.
 | `ACL WHOAMI` | Forwarded to one primary node |
 | `COMMAND` | |
 | `COMMAND COUNT` | Counts only the commands this proxy supports |
-| `COMMAND DOCS` | Forwarded to one primary node; reply filtered to only the commands this proxy supports |
+| `COMMAND DOCS` | Forwarded to one primary node; reply filtered to only the commands this proxy supports (for `CONFIG`, only the `GET` and `SET` subcommands) |
 | `COMMAND GETKEYS` | Forwarded to one primary node |
 | `COMMAND GETKEYSANDFLAGS` | Forwarded to one primary node |
 | `COMMAND HELP` | Forwarded to one primary node |
-| `COMMAND INFO` | Forwarded to one primary node; reply filtered to only the commands this proxy supports |
+| `COMMAND INFO` | Forwarded to one primary node; reply filtered to only the commands this proxy supports (for `CONFIG`, only the `GET` and `SET` subcommands) |
 | `COMMAND LIST` | Forwarded to one primary node; reply filtered to only the commands this proxy supports |
 | `COMMANDLOG GET` | Broadcast to every primary node |
 | `COMMANDLOG HELP` | Forwarded to one primary node |
@@ -385,6 +385,8 @@ The list below covers every supported command.
 | `HOTKEYS GET` | Broadcast to every primary node; entries merged by qps, highest first, not truncated |
 | `HOTKEYS HELP` | Forwarded to one primary node |
 | `HOTKEYS RESET` | Broadcast to every primary node; `+OK` only if every node succeeds |
+| `CONFIG GET` | Only with `config-command-enable 1` (default 0: refused). Broadcast to every primary node; the reply is relayed only if every node answers the same name/value pairs, else `-ERR all responses not same`. Refused inside `MULTI`, since a transaction runs on one node. With it off, `valkey-benchmark` prints `WARNING: Could not fetch server CONFIG` and leaves the `host configuration` lines out of its report; this doesn't affect the results |
+| `CONFIG SET` | Only with `config-command-enable 1` (default 0: refused). Broadcast to every primary node; `+OK` only if every node succeeds, else a node's error. Nodes that accepted it keep the new value, and replicas aren't changed. Refused inside `MULTI`, since a transaction runs on one node |
 
 ### Bloom Filter
 
@@ -525,11 +527,9 @@ These commands require the Search module (valkey-search) to be loaded on every b
 | `ACL SETUSER` | |
 | `BGREWRITEAOF` | |
 | `BGSAVE` | |
-| `CONFIG GET` | `valkey-benchmark` sends `CONFIG GET save` and `CONFIG GET appendonly` before it starts. Through the proxy it prints `WARNING: Could not fetch server CONFIG` and leaves the `host configuration` lines out of its report. This is expected and doesn't affect the results |
 | `CONFIG HELP` | |
 | `CONFIG RESETSTAT` | |
 | `CONFIG REWRITE` | |
-| `CONFIG SET` | |
 | `FAILOVER` | |
 | `LASTSAVE` | |
 | `LATENCY DOCTOR` | |

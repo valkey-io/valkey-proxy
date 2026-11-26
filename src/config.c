@@ -154,7 +154,13 @@ void parse_conf(const char *path) {
         else if (!strcmp(key, "proxy-config-readonly-users"))
             add_users(path, lineno, key, p, val, g_config.proxy_config_readonly_users,
                       sizeof(g_config.proxy_config_readonly_users));
-        else if (!strcmp(key, "reported-version"))
+        else if (!strcmp(key, "config-command-enable")) {
+            if (strcmp(val, "0") != 0 && strcmp(val, "1") != 0) {
+                fprintf(stderr, "%s:%d: config-command-enable must be 0 or 1\n", path, lineno);
+                exit(1);
+            }
+            g_config.config_command_enable = atoi(val);
+        } else if (!strcmp(key, "reported-version"))
             set_reported(key, p, val, g_config.reported_version, sizeof(g_config.reported_version));
         else if (!strcmp(key, "reported-role"))
             set_reported(key, p, val, g_config.reported_role, sizeof(g_config.reported_role));
