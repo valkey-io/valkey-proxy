@@ -113,6 +113,17 @@ void run_acl_tests(const char *host, int port, int *pass, int *fail) {
         }
         CHECK(has_phget && has_phset, "ACL CAT pathhash: lists phget and phset", pass, fail);
     }
+    proxy_cmd(fd, r, sizeof(r), 3, "ACL", "CAT", "search");
+    CHECK(r[0] == '*' && atoi(r + 1) == 8, "ACL CAT search: all 8 supported FT.* commands", pass, fail);
+    if (r[0] == '*') {
+        int n = atoi(r + 1), has_hybrid = 0, has_cursor = 0;
+        for (int i = 0; i < n; i++) {
+            resp_next_str(fd, r, sizeof(r));
+            if (!strcmp(r, "FT.HYBRID")) has_hybrid = 1;
+            if (!strcmp(r, "FT.CURSOR")) has_cursor = 1;
+        }
+        CHECK(has_hybrid && has_cursor, "ACL CAT search: lists FT.HYBRID and FT.CURSOR", pass, fail);
+    }
     proxy_cmd(fd, r, sizeof(r), 3, "ACL", "CAT", "admin");
     CHECK(r[0] == '*', "ACL CAT admin: returns an array", pass, fail);
     if (r[0] == '*') {
