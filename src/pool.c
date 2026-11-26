@@ -37,6 +37,11 @@ static void pool_stats_handoff(ConnPool *p, ClientConn *client) {
 }
 
 /* ── connection pool ────────────────────────────────────────────────── */
+/* The node p connects to: a master in topo.nodes, or a replica's. */
+const ClusterNode *pool_node(const Worker *w, const ConnPool *p) {
+    return p->replica ? &w->topo.replicas[p->node_idx].node : &w->topo.nodes[p->node_idx];
+}
+
 static int send_select(int fd, int db) {
     char cmd[64], num[16];
     int nl = snprintf(num, sizeof(num), "%d", db);
@@ -50,7 +55,7 @@ static int send_select(int fd, int db) {
 }
 
 int pool_new_fd(Worker *w, ConnPool *p) {
-    const ClusterNode *node = &w->topo.nodes[p->node_idx];
+    const ClusterNode *node = pool_node(w, p);
     /* Short, configurable timeout (not tcp_connect()'s fixed 5s) -- this
      * runs on the worker thread, so a node that's momentarily unreachable
      * (a replica still finishing promotion, a node about to be grace-
@@ -89,7 +94,7 @@ static void pool_fill_to(Worker *w, ConnPool *p, int want) {
         if (!p->conns) return;
         p->cap = p->max;
     }
-    const ClusterNode *node = &w->topo.nodes[p->node_idx];
+    const ClusterNode *node = pool_node(w, p);
     while (p->count < want && p->count < p->max) {
         int fd = pool_new_fd(w, p);
         if (fd < 0) {
@@ -145,8 +150,14 @@ static void pool_fill_to(Worker *w, ConnPool *p, int want) {
 }
 
 void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db) {
+    pool_init_sized(w, p, type, node_idx, db, pool_max_load(type), pool_min_load(type));
+}
+
+/* pool_init() with a given max and min (the replicas' pools, see
+ * worker_sync_topology()). */
+void pool_init_sized(Worker *w, ConnPool *p, PoolType type, int node_idx, int db, int max, int min) {
     p->type = type;
-    p->max = pool_max_load(type);
+    p->max = max;
     p->cap = 0;
     p->count = 0;
     p->in_use = 0;
@@ -166,7 +177,7 @@ void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db) {
         return;
     }
     atomic_store_explicit(&p->stats.live, 1, memory_order_release);
-    int want = pool_min_load(type);
+    int want = min;
     if (want == 0) {
         printf("      %-14s pool:  0/%d (on-demand)\n", POOL_NAME[type], p->max);
         return;
@@ -195,7 +206,7 @@ PoolConn *pool_acquire_nb(Worker *w, ConnPool *p) {
         }
         int fd = pool_new_fd(w, p);
         if (fd >= 0) {
-            const ClusterNode *node = &w->topo.nodes[p->node_idx];
+            const ClusterNode *node = pool_node(w, p);
             PoolConn *c = &p->conns[p->count];
             c->fd = fd;
             conn_set_state(p, c, CONN_IN_USE); /* fresh slot, so this counts it */
@@ -319,7 +330,7 @@ static int pool_reconnect_conn_or_destroy(Worker *w, PoolConn *c) {
     c->resp3_probe = 0;
     if (newfd < g_config.max_connection) w->backend_map[newfd] = c;
 
-    const ClusterNode *node = &w->topo.nodes[p->node_idx];
+    const ClusterNode *node = pool_node(w, p);
     printf("[worker %d] [pool:%s] reconnected fd=%-4d node=%s:%d (topology change, was fd=%d)\n", w->thread_id,
            POOL_NAME[p->type], newfd, node->ip, node->port, old_fd);
     stat_add(&p->stats.reconnects, 1);
@@ -339,7 +350,7 @@ void pool_release(Worker *w, PoolConn *c) {
     }
 
     ConnPool *p = c->pool;
-    const ClusterNode *nd = &w->topo.nodes[p->node_idx];
+    const ClusterNode *nd = pool_node(w, p);
     if (p->wait_len > 0) {
         ClientConn *next = p->wait_queue[0];
         memmove(p->wait_queue, p->wait_queue + 1, (size_t)(p->wait_len - 1) * sizeof(ClientConn *));
@@ -369,7 +380,7 @@ void pool_release(Worker *w, PoolConn *c) {
 /* Close a pool connection and remove it from the pool array. */
 void pool_destroy_conn(Worker *w, PoolConn *c) {
     ConnPool *p = c->pool;
-    const ClusterNode *nd = &w->topo.nodes[p->node_idx];
+    const ClusterNode *nd = pool_node(w, p);
 
     /* Pinned to a transaction: every way a connection can die ends here, so
      * this is where the transaction learns it lost its WATCH / its queue. */
@@ -508,6 +519,73 @@ DbGroup *db_group_get(Worker *w, int db) {
     return db_group_create(w, db);
 }
 
+/* After a node index's gen moved (its node changed, or it's gone): closes
+ * p's idle connections and marks busy ones to be reconnected on release.
+ * With still_live 0 nothing will ever answer on them, so in-flight fan-out
+ * subs and requests are failed now and so are parked waiters; with it 1
+ * the pool is filled back up to want against the new address. */
+static void pool_flush_for_gen(Worker *w, ConnPool *p, int still_owns_slots, int want) {
+    /* Iterate back-to-front: pool_destroy_conn compacts the
+         * array by swapping the last live element into the
+         * removed slot, so walking backwards visits every
+         * original element exactly once despite the array
+         * shrinking underneath the loop. */
+    for (int i = p->count - 1; i >= 0; i--) {
+        PoolConn *c = &p->conns[i];
+        if (c->state == CONN_AVAILABLE) {
+            pool_destroy_conn(w, c);
+            continue;
+        }
+        if (!still_owns_slots && c->fanout_sub) {
+            /* This node is confirmed gone for good and nothing
+                 * will ever call pool_release()/handle_fanout_sub_readable()
+                 * on this conn again (no epoll event may ever fire,
+                 * e.g. a silent network partition rather than a
+                 * clean kill/RST) -- complete the sub as an error
+                 * right now instead of leaving its FanoutCtx
+                 * waiting forever. */
+            FanoutSub *sub = c->fanout_sub;
+            FanoutCtx *ctx = sub->ctx;
+            sub->error = 1;
+            sub->done = 1;
+            c->fanout_sub = NULL;
+            pool_destroy_conn(w, c);
+            sub->conn = NULL;
+            ctx->had_error = 1;
+            ctx->ndone++;
+            if (ctx->ndone == ctx->nsubs) fanout_aggregate_and_reply(w, ctx);
+        } else if (!still_owns_slots && c->waiting_client) {
+            /* Symmetric case for an already-dispatched single-key
+                 * request: same "nobody will ever release this"
+                 * reasoning as above. A client's own logged-in
+                 * connection keeps waiting_client while idle, and
+                 * then has no request to fail. */
+            ClientConn *wc = c->waiting_client;
+            if (p->type == POOL_ACL && c != wc->pending_conn && !c->acl_authenticating)
+                pool_destroy_conn(w, c);
+            else
+                client_recover_after_backend_error(w, wc, c, "backend node unavailable");
+        } else {
+            c->discard_on_release = 1;
+        }
+    }
+    /* Reconnect against the new address right away instead
+         * of waiting for the next client command to lazily grow
+         * the pool -- this is what lets an in-progress failover
+         * (scenario 3) finish without a client-visible gap. Skip
+         * it when the index no longer owns any slot at all
+         * (scenario 2): there is nothing live to reconnect to. */
+    if (still_owns_slots) pool_fill_to(w, p, want);
+    /* Scenario 2: this node is gone for good and nothing will
+         * ever call pool_release()/pool_fill_to() on this pool
+         * again, so anyone already parked in wait_queue (e.g. a
+         * client whose backend connection died before the node
+         * was confirmed unreachable) would otherwise hang
+         * forever. Fail them now instead. */
+    else if (p->wait_len > 0)
+        pool_fail_all_waiters(w, p, "backend node unavailable");
+}
+
 /* ── topology sync ──────────────────────────────────────────────────── */
 /* Called once per worker event-loop wakeup whenever g_topology_version has
  * moved since this worker last looked (see the check in worker_thread()).
@@ -523,8 +601,35 @@ void worker_sync_topology(Worker *w) {
     memcpy(w->topo.node_has_slots, g_node_has_slots, sizeof(w->topo.node_has_slots));
     memcpy(w->topo.slot_map, g_slot_map, sizeof(w->topo.slot_map));
     w->topo.node_count = g_node_count;
+    memcpy(w->topo.replicas, g_replicas, sizeof(w->topo.replicas));
+    memcpy(w->topo.replica_gen, g_replica_gen, sizeof(w->topo.replica_gen));
+    memcpy(w->topo.replica_alive, g_replica_alive, sizeof(w->topo.replica_alive));
+    w->topo.replica_count = g_replica_count;
     w->topo.version = atomic_load_explicit(&g_topology_version, memory_order_acquire);
     pthread_rwlock_unlock(&g_topology_lock);
+
+    /* Replicas: one small db-0 pool each, opened right away (this runs once
+     * as the worker starts), for CONFIG GET/SET. A replica that failed or
+     * left keeps its pool, emptied, until it comes back. */
+    for (int i = 0; i < w->topo.replica_count; i++) {
+        ConnPool *p = &w->replica_pools[i];
+        int gen = w->topo.replica_gen[i], alive = w->topo.replica_alive[i];
+        if (!w->replica_pool_gen[i]) {
+            if (!alive) continue;
+            const ClusterNode *n = &w->topo.replicas[i].node;
+            printf("  [worker %d] replica [r%d] %s:%d: opening its CONFIG connection\n", w->thread_id, i, n->ip,
+                   n->port);
+            p->replica = 1;
+            pool_init_sized(w, p, POOL_NORMAL, i, 0, REPLICA_POOL_MAX, REPLICA_POOL_MIN);
+            w->replica_pool_gen[i] = gen + 1;
+        } else if (w->replica_pool_gen[i] - 1 != gen) {
+            const ClusterNode *n = &w->topo.replicas[i].node;
+            printf("  [worker %d] replica [r%d] %s:%d %s, flushing its pool\n", w->thread_id, i, n->ip, n->port,
+                   alive ? "changed" : "gone");
+            pool_flush_for_gen(w, p, alive, REPLICA_POOL_MIN);
+            w->replica_pool_gen[i] = gen + 1;
+        }
+    }
 
     for (int gi = 0; gi < w->db_group_count; gi++) {
         DbGroup *grp = &w->db_groups[gi];
@@ -555,65 +660,7 @@ void worker_sync_topology(Worker *w) {
                         mux_pool_reset(w, p, still_owns_slots, "backend node changed");
                         continue;
                     }
-                    /* Iterate back-to-front: pool_destroy_conn compacts the
-                     * array by swapping the last live element into the
-                     * removed slot, so walking backwards visits every
-                     * original element exactly once despite the array
-                     * shrinking underneath the loop. */
-                    for (int i = p->count - 1; i >= 0; i--) {
-                        PoolConn *c = &p->conns[i];
-                        if (c->state == CONN_AVAILABLE) {
-                            pool_destroy_conn(w, c);
-                            continue;
-                        }
-                        if (!still_owns_slots && c->fanout_sub) {
-                            /* This node is confirmed gone for good and nothing
-                             * will ever call pool_release()/handle_fanout_sub_readable()
-                             * on this conn again (no epoll event may ever fire,
-                             * e.g. a silent network partition rather than a
-                             * clean kill/RST) -- complete the sub as an error
-                             * right now instead of leaving its FanoutCtx
-                             * waiting forever. */
-                            FanoutSub *sub = c->fanout_sub;
-                            FanoutCtx *ctx = sub->ctx;
-                            sub->error = 1;
-                            sub->done = 1;
-                            c->fanout_sub = NULL;
-                            pool_destroy_conn(w, c);
-                            sub->conn = NULL;
-                            ctx->had_error = 1;
-                            ctx->ndone++;
-                            if (ctx->ndone == ctx->nsubs) fanout_aggregate_and_reply(w, ctx);
-                        } else if (!still_owns_slots && c->waiting_client) {
-                            /* Symmetric case for an already-dispatched single-key
-                             * request: same "nobody will ever release this"
-                             * reasoning as above. A client's own logged-in
-                             * connection keeps waiting_client while idle, and
-                             * then has no request to fail. */
-                            ClientConn *wc = c->waiting_client;
-                            if (p->type == POOL_ACL && c != wc->pending_conn && !c->acl_authenticating)
-                                pool_destroy_conn(w, c);
-                            else
-                                client_recover_after_backend_error(w, wc, c, "backend node unavailable");
-                        } else {
-                            c->discard_on_release = 1;
-                        }
-                    }
-                    /* Reconnect against the new address right away instead
-                     * of waiting for the next client command to lazily grow
-                     * the pool -- this is what lets an in-progress failover
-                     * (scenario 3) finish without a client-visible gap. Skip
-                     * it when the index no longer owns any slot at all
-                     * (scenario 2): there is nothing live to reconnect to. */
-                    if (still_owns_slots) pool_fill_to(w, p, pool_min_load(pt));
-                    /* Scenario 2: this node is gone for good and nothing will
-                     * ever call pool_release()/pool_fill_to() on this pool
-                     * again, so anyone already parked in wait_queue (e.g. a
-                     * client whose backend connection died before the node
-                     * was confirmed unreachable) would otherwise hang
-                     * forever. Fail them now instead. */
-                    else if (p->wait_len > 0)
-                        pool_fail_all_waiters(w, p, "backend node unavailable");
+                    pool_flush_for_gen(w, p, still_owns_slots, pool_min_load(pt));
                 }
                 np->gen = w->topo.node_gen[idx];
             }

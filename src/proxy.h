@@ -24,9 +24,14 @@
 #endif
 
 /* ── constants ──────────────────────────────────────────────────────── */
-#define MAX_NODES     64
-#define MAX_WORKERS   64
-#define PROXY_VERSION "0.1.0"
+#define MAX_NODES    64
+#define MAX_REPLICAS 128
+/* Each worker's pool per replica (CONFIG GET/SET only): min opened at
+ * startup, max for that many CONFIG commands at once on one worker. */
+#define REPLICA_POOL_MIN 1
+#define REPLICA_POOL_MAX 4
+#define MAX_WORKERS      64
+#define PROXY_VERSION    "0.1.0"
 /* Fallback for the "max-connection" proxy.conf setting (g_config.max_connection)
  * when the config file doesn't set it. This is the shared fd budget for the
  * whole process: client sockets + backend pool connections + listener(s). */
@@ -228,6 +233,9 @@ struct ConnPool {
     int count, max, cap;
     int in_use; /* conns in CONN_IN_USE, kept exact by conn_set_state() */
     int node_idx, db;
+    /* 1 = a replica's pool: node_idx is an index into topo.replicas (see
+     * pool_node_addr() in pool.c), and it lives in Worker.replica_pools. */
+    int replica;
     EventLoop *el;
     pthread_mutex_t lock;
     ClientConn **wait_queue;
@@ -376,7 +384,8 @@ struct ClientConn {
 struct FanoutSub {
     FanoutCtx *ctx;
     int sub_idx;
-    int node_idx;
+    int node_idx; /* an index into topo.replicas when replica is set */
+    int replica;
     int slot; /* picks the POOL_SHARED connection when ctx->req is set */
     PoolConn *conn;
     char *rbuf;
@@ -413,6 +422,13 @@ typedef struct {
     int is_master;
 } ClusterNode;
 
+/* A replica from CLUSTER NODES. Only CONFIG GET/SET use replicas (see
+ * handle_config_cmd() in fanout.c); nothing is routed to them. */
+typedef struct {
+    ClusterNode node; /* is_master 0 */
+    char master_id[64];
+} ReplicaNode;
+
 /* Per-worker frozen view of the cluster topology, refreshed wholesale from
  * the global g_nodes/g_node_gen/g_slot_map/g_node_count/g_topology_version
  * (see worker_sync_topology() in pool.c) whenever g_topology_version moves.
@@ -426,6 +442,13 @@ typedef struct {
     int node_count;
     int slot_map[CLUSTER_SLOTS];
     int version;
+    /* Replicas, indexed like g_replicas: a stable index per node_id, gen
+     * bumped when its address changes or it comes and goes, alive 0 while
+     * it's failed or gone from CLUSTER NODES. */
+    ReplicaNode replicas[MAX_REPLICAS];
+    int replica_gen[MAX_REPLICAS];
+    int replica_alive[MAX_REPLICAS];
+    int replica_count;
 } TopoSnapshot;
 
 /* A user's answer to the admin check (see acl.c): allowed, or the
@@ -503,6 +526,11 @@ typedef struct {
      * during setup (-1); the main thread hands this worker nothing until 1. */
     atomic_int handoff_ready;
     AdminCheck admin_cache[ADMIN_CACHE_SIZE];
+    /* One POOL_NORMAL pool per replica, db 0, opened when the worker starts
+     * and kept for CONFIG GET/SET (see worker_sync_topology()). Its gen as
+     * of the last sync is replica_pool_gen[i] - 1; 0 = no pool yet. */
+    ConnPool replica_pools[MAX_REPLICAS];
+    int replica_pool_gen[MAX_REPLICAS];
 } Worker;
 
 typedef struct {
@@ -569,6 +597,11 @@ extern int g_node_gen[MAX_NODES];
  * (scenario 3, gen also bumped but the index *does* still own slots, just
  * under a new address) so they know whether reconnecting is worthwhile. */
 extern int g_node_has_slots[MAX_NODES];
+/* Replicas, published with the rest of the topology (see TopoSnapshot). */
+extern ReplicaNode g_replicas[MAX_REPLICAS];
+extern int g_replica_gen[MAX_REPLICAS];
+extern int g_replica_alive[MAX_REPLICAS];
+extern int g_replica_count;
 extern atomic_int g_topology_version;
 /* Sticky, process-wide: 0 until the first client's "HELLO 3" successfully
  * probes backend RESP3 support (see resp3_start_probe() in hello.c), then
@@ -689,6 +722,8 @@ int gb_append_fmt(GrowBuf *g, const char *fmt, ...) __attribute__((format(printf
 
 /* ── connection pool ────────────────────────────────────────────────── */
 void pool_init(Worker *w, ConnPool *p, PoolType type, int node_idx, int db);
+void pool_init_sized(Worker *w, ConnPool *p, PoolType type, int node_idx, int db, int max, int min);
+const ClusterNode *pool_node(const Worker *w, const ConnPool *p);
 int pool_new_fd(Worker *w, ConnPool *p);
 PoolConn *pool_acquire_nb(Worker *w, ConnPool *p);
 void pool_enqueue_waiter(ConnPool *p, ClientConn *client);

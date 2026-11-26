@@ -63,7 +63,9 @@ merged by `qps`, highest first, and not truncated, since each node already caps 
 `hotkeys-top-k`; each entry is a `key`/`db`/`qps` map, a flat array in RESP2; needs Valkey 9.2+ backends
 with `hotkeys-top-k` above 0, otherwise empty; a key whose slot is migrating can show up once per node),
 `HOTKEYS RESET` (`+OK` only if every node succeeds), `CONFIG GET` / `CONFIG SET` (only while
-`config-command-enable` is 1, see §6; `GET` relays the reply only if every node answers the same
+`config-command-enable` is 1, see §6; sent to the replicas too, over one connection per replica that
+each worker opens at startup, skipping replicas the cluster marks failed; a node that can't be reached
+fails the command with `-ERR CONFIG <GET|SET> failed on <primary|replica> <ip:port>`; `GET` relays the reply only if every node answers the same
 name/value pairs, compared regardless of order, else `-ERR all responses not same`; `SET` is `+OK`
 only if every node succeeds, else a node's error, and the nodes that accepted it keep the new value; both are refused inside `MULTI`, since a transaction
 runs on one node),
@@ -230,7 +232,7 @@ directly affect command behavior are listed here:
 | `transaction-replay-buffer-size` | 1048576 | Most bytes of queued commands kept per transaction for replaying it on the new node after `-MOVED` (see §8); 0 disables replay |
 | `min-acl-connection` / `max-acl-connection` | 0 / 10 | `ACL`/`AUTH`, plus each authenticated client's dedicated per-node connections |
 | `cluster-refresh-interval-ms` | 500 | How often (ms) the cluster topology is refreshed in the background; 0 disables it |
-| `config-command-enable` | 0 | 1 lets clients run `CONFIG GET` / `CONFIG SET`, sent to every primary (see §3.3); 0 refuses them. Settable at runtime with `PROXY CONFIG SET` |
+| `config-command-enable` | 0 | 1 lets clients run `CONFIG GET` / `CONFIG SET`, sent to every primary and replica (see §3.3); 0 refuses them. Settable at runtime with `PROXY CONFIG SET` |
 | `proxy-config-admin-users` / `proxy-config-readonly-users` | unset | ACL users (after `AUTH`) who may run every `PROXY CONFIG` subcommand / only `GET` and `HELP`; unset means nobody (see §3.4) |
 | `max-connection` | 4000 | Per-worker-thread fd budget (client sockets + backend connections + listener fd(s)) |
 | `max-multikey-payload` | 67108864 (64MB) | Largest command held in full before forwarding (multi-key fan-out such as `MGET`/`MSET`/`DEL`, blocking commands, `AUTH`); a larger one gets `-ERR command too large` |

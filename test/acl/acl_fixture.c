@@ -46,6 +46,7 @@ const char *g_test_acl_kill_pass = NULL;
 static char fixture_pass[64], fixture_ro_pass[64], fixture_noadmin_pass[64], fixture_cl_pass[64], fixture_kill_pass[64];
 static char node_host[64][256];
 static int node_port[64];
+static int node_replica[64];
 static int node_count = 0;
 
 /* Runs one command directly against a cluster node; returns 1 if the reply
@@ -96,6 +97,18 @@ void test_acl_fixture_teardown(void) {
     g_test_acl_kill_user = g_test_acl_kill_pass = NULL;
 }
 
+/* The usable (not failed) cluster nodes --cluster found: how many, and
+ * node i's address and whether it's a replica. 0 without --cluster. */
+int test_cluster_node_count(void) {
+    return node_count;
+}
+
+const char *test_cluster_node(int i, int *port, int *replica) {
+    *port = node_port[i];
+    *replica = node_replica[i];
+    return node_host[i];
+}
+
 /* Closes every connection logged in as user on every cluster node, as a
  * backend timeout or restart would. */
 void test_acl_fixture_kill_user(const char *user) {
@@ -136,6 +149,7 @@ int test_acl_fixture_setup(const char *seed) {
         *colon = '\0';
         snprintf(node_host[node_count], sizeof(node_host[0]), "%s", addr);
         node_port[node_count] = atoi(colon + 1);
+        node_replica[node_count] = strstr(flags, "slave") != NULL;
         node_count++;
     }
     if (node_count == 0) {

@@ -385,8 +385,8 @@ The list below covers every supported command.
 | `HOTKEYS GET` | Broadcast to every primary node; entries merged by qps, highest first, not truncated |
 | `HOTKEYS HELP` | Forwarded to one primary node |
 | `HOTKEYS RESET` | Broadcast to every primary node; `+OK` only if every node succeeds |
-| `CONFIG GET` | Only with `config-command-enable 1` (default 0: refused). Refused inside `MULTI`, since a transaction runs on one node. With it off, `valkey-benchmark` prints `WARNING: Could not fetch server CONFIG` and leaves the `host configuration` lines out of its report; this doesn't affect the results |
-| `CONFIG SET` | Only with `config-command-enable 1` (default 0: refused). Refused inside `MULTI`, since a transaction runs on one node |
+| `CONFIG GET` | Only with `config-command-enable 1` (default 0: refused). Sent to every primary and replica; relayed only if all answer the same, else `-ERR all responses not same`. Refused inside `MULTI`, since a transaction runs on one node. With it off, `valkey-benchmark` prints `WARNING: Could not fetch server CONFIG` and leaves the `host configuration` lines out of its report; this doesn't affect the results |
+| `CONFIG SET` | Only with `config-command-enable 1` (default 0: refused). Sent to every primary and replica; `+OK` only if all succeed. Refused inside `MULTI`, since a transaction runs on one node |
 
 ### Bloom Filter
 
