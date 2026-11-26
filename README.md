@@ -85,6 +85,32 @@ tls-enabled  no
 ./valkey-proxy proxy.conf
 ```
 
+### Container image
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to
+`ghcr.io/valkey-io/valkey-proxy` for every release. The proxy reads `/proxy.conf` by default:
+
+```bash
+docker run --rm -v "$PWD/proxy.conf:/proxy.conf:ro" -p 7777:7777 ghcr.io/valkey-io/valkey-proxy:latest
+```
+
+## Releasing
+
+1. Set `PROXY_VERSION` in `src/proxy.h` to the new version and merge it to `main`.
+2. Tag that commit and push the tag:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+The [Release workflow](.github/workflows/release.yml) fails if the tag doesn't match `PROXY_VERSION`.
+Otherwise it builds the image natively on amd64 and arm64 runners and pushes it as `:X.Y.Z`, `:X.Y` and
+`:latest`. It then creates the GitHub release with generated notes. A pre-release tag such as `v0.2.0-rc1`
+needs `PROXY_VERSION` set to `0.2.0`, is pushed only as `:0.2.0-rc1`, and is marked as a pre-release.
+Release notes are grouped by PR label (`enhancement`, `bug`) as configured in
+[.github/release.yml](.github/release.yml).
+
 ## Integration Tests
 
 Build the test runner once; then point it at any running proxy:
