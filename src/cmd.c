@@ -57,7 +57,9 @@ static const char *NON_TXN_CMDS[] = {"ACL",
                                      "FT._LIST",
                                      "FT.AGGREGATE",
                                      "FT.CREATE",
+                                     "FT.CURSOR",
                                      "FT.DROPINDEX",
+                                     "FT.HYBRID",
                                      "FT.INFO",
                                      "FT.SEARCH",
                                      "FUNCTION",
@@ -404,11 +406,12 @@ static const char *FANOUT_CMDS[] = {"DEL",  "EXISTS", "JSON.MGET", "JSON.MSET", 
 /* Commands not routed by key slot: answered by the proxy itself, broadcast
  * to every primary, or forwarded to an arbitrary node. Some take arguments
  * that look like keys (e.g. CLUSTER KEYSLOT) but are never used for routing. */
-static const char *NO_SLOT_CMDS[] = {
-    "CLIENT",    "CLUSTER",      "COMMAND",   "COMMANDLOG",   "DBSIZE",  "ECHO",      "FLUSHALL", "FLUSHDB",
-    "FT._LIST",  "FT.AGGREGATE", "FT.CREATE", "FT.DROPINDEX", "FT.INFO", "FT.SEARCH", "FUNCTION", "HELLO",
-    "HOTKEYS",   "INFO",         "KEYS",      "LOLWUT",       "MODULE",  "PING",      "PROXY",    "PUBSUB",
-    "RANDOMKEY", "SCAN",         "SCRIPT",    "SELECT",       "SLOWLOG", "TIME",      NULL};
+static const char *NO_SLOT_CMDS[] = {"CLIENT",       "CLUSTER",   "COMMAND",   "COMMANDLOG",   "DBSIZE",    "ECHO",
+                                     "FLUSHALL",     "FLUSHDB",   "FT._LIST",  "FT.AGGREGATE", "FT.CREATE", "FT.CURSOR",
+                                     "FT.DROPINDEX", "FT.HYBRID", "FT.INFO",   "FT.SEARCH",    "FUNCTION",  "HELLO",
+                                     "HOTKEYS",      "INFO",      "KEYS",      "LOLWUT",       "MODULE",    "PING",
+                                     "PROXY",        "PUBSUB",    "RANDOMKEY", "SCAN",         "SCRIPT",    "SELECT",
+                                     "SLOWLOG",      "TIME",      NULL};
 
 /* Commands whose RESP2 reply has a nil *array* rather than a nil bulk
  * string somewhere in it -- see resp3_downgrade()'s nil_array_depth

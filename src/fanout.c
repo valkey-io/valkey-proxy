@@ -4009,7 +4009,11 @@ void handle_noslot_cmd(Worker *w, ClientConn *client, const char *cmd, int cmdle
     }
     if (!strcmp(cmd, "RANDOMKEY") || !strcmp(cmd, "LOLWUT") || !strcmp(cmd, "FT._LIST") || !strcmp(cmd, "FT.INFO") ||
         !strcmp(cmd, "FT.CREATE") || !strcmp(cmd, "FT.DROPINDEX") || !strcmp(cmd, "FT.SEARCH") ||
-        !strcmp(cmd, "FT.AGGREGATE")) {
+        !strcmp(cmd, "FT.AGGREGATE") || !strcmp(cmd, "FT.HYBRID") || !strcmp(cmd, "FT.CURSOR")) {
+        /* A WITHCURSOR cursor (FT.AGGREGATE / FT.HYBRID / FT.SEARCH) lives
+         * only on the node that ran the query, so FT.CURSOR READ/DEL must
+         * reach that same node: every FT.* command goes to the first
+         * primary, which stays the same node until the topology changes. */
         /* FT.INFO <index> with no scope options defaults to the backend's
          * LOCAL mode (only that one shard's stats); rewrite it to
          * FT.INFO <index> PRIMARY ALLSHARDS so the reply covers every

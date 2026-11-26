@@ -152,6 +152,8 @@ static const char *ACL_CAT_READ[] = {
     "phprefixes",
     "phpathscan",
     "phpathexists",
+    "FT.HYBRID",
+    "FT.CURSOR",
     NULL};
 
 static const char *ACL_CAT_WRITE[] = {
@@ -870,6 +872,8 @@ static const char *ACL_CAT_SLOW[] = {
     "phpathscan",
     "phdel",
     "phpathdel",
+    "FT.HYBRID",
+    "FT.CURSOR",
     NULL};
 
 static const char *ACL_CAT_BLOCKING[] = {
@@ -1019,6 +1023,8 @@ static const char *ACL_CAT_SEARCH[] = {
     "FT.CREATE",
     "FT._LIST",
     "FT.SEARCH",
+    "FT.HYBRID",
+    "FT.CURSOR",
     NULL};
 
 static const AclCategory ACL_CATEGORIES[] = {
