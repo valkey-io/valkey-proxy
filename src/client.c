@@ -362,7 +362,7 @@ void resume_client_after_conn(Worker *w, ClientConn *client, PoolConn *conn) {
     /* A transaction's deferred MULTI goes out (and is acknowledged) first;
      * this runs again once it has been. */
     if (txn_before_send(w, client, conn)) return;
-    const ClusterNode *nd = &w->topo.nodes[conn->pool->node_idx];
+    const ClusterNode *nd = pool_node(w, conn->pool);
     printf("[worker %d] [pool:%s] acquire  fd=%-4d  node=%s:%d  db=%d  in-use=%d/%d  client-fd=%d\n", w->thread_id,
            POOL_NAME[conn->pool->type], conn->fd, nd->ip, nd->port, conn->db, conn->pool->count, conn->pool->max,
            client->fd);

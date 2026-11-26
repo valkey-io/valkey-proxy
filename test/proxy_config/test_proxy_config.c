@@ -89,6 +89,36 @@ static int file_has_setting(const char *text, const char *name, int value) {
     return 0;
 }
 
+/* CONFIG GET <name> on fd, its single value copied into out; -1 if the
+ * reply isn't one name/value pair. */
+static int config_get_one(int fd, const char *name, char *out, int cap) {
+    char buf[512];
+    out[0] = '\0';
+    if (resp_send_raw_reply(fd, buf, sizeof(buf), 3, "CONFIG", "GET", name) <= 0 || strncmp(buf, "*2\r\n", 4) != 0)
+        return -1;
+    const char *v = strstr(buf + 4, "\r\n$"); /* end of the name */
+    v = v ? strstr(v + 3, "\r\n") : NULL;     /* end of the value's $<len> line */
+    if (!v) return -1;
+    snprintf(out, (size_t)cap, "%.*s", (int)strcspn(v + 2, "\r"), v + 2);
+    return 0;
+}
+
+/* How many of the --cluster nodes (replicas too) have name set to want,
+ * asked directly; *total gets how many were asked. */
+static int nodes_with_value(const char *name, const char *want, int *total) {
+    int same = 0, n = test_cluster_node_count();
+    *total = n;
+    for (int i = 0; i < n; i++) {
+        int port, replica;
+        const char *h = test_cluster_node(i, &port, &replica);
+        int fd = proxy_connect(h, port);
+        char v[64];
+        if (fd >= 0 && config_get_one(fd, name, v, sizeof(v)) == 0 && !strcmp(v, want)) same++;
+        if (fd >= 0) close(fd);
+    }
+    return same;
+}
+
 void run_proxy_config_tests(const char *host, int port, int *pass, int *fail) {
     printf("\n=== PROXY CONFIG Tests ===\n");
 
@@ -479,6 +509,48 @@ void run_proxy_config_tests(const char *host, int port, int *pass, int *fail) {
           fail);
     proxy_cmd(fd, r, sizeof(r), 2, "CONFIG", "RESETSTAT");
     CHECK(strcmp(r, "-ERR unsupport command") == 0, "CONFIG RESETSTAT: still unsupported", pass, fail);
+
+    /* replicas get CONFIG too: SET reaches every node, and a replica that
+     * differs makes GET disagree. slowlog-max-len is changed only briefly
+     * and put back. */
+    {
+        int nrep = 0, total;
+        for (int i = 0; i < test_cluster_node_count(); i++) {
+            int p_, rep;
+            test_cluster_node(i, &p_, &rep);
+            nrep += rep;
+        }
+        n = resp_send_raw_reply(fd, big, cap, 2, "PROXY", "POOLS");
+        CHECK(n > 0 && (nrep == 0 || strstr(big, "pool_replica0_normal:")), "PROXY POOLS: lists the replicas' pools",
+              pass, fail);
+        char orig[64], v1[16], v2[16];
+        if (nrep == 0 || config_get_one(fd, "slowlog-max-len", orig, sizeof(orig)) < 0) {
+            SKIP("CONFIG on replicas (needs --cluster with replicas)");
+        } else {
+            snprintf(v1, sizeof(v1), "%d", atoi(orig) + 1);
+            snprintf(v2, sizeof(v2), "%d", atoi(orig) + 2);
+            proxy_cmd(fd, r, sizeof(r), 4, "CONFIG", "SET", "slowlog-max-len", v1);
+            CHECK(strcmp(r, "+OK") == 0, "CONFIG SET slowlog-max-len: +OK", pass, fail);
+            int same = nodes_with_value("slowlog-max-len", v1, &total);
+            CHECK(same == total, "CONFIG SET: every primary and replica has the new value", pass, fail);
+            /* one replica set apart, directly */
+            for (int i = 0; i < test_cluster_node_count(); i++) {
+                int rp, rep;
+                const char *rh = test_cluster_node(i, &rp, &rep);
+                if (!rep) continue;
+                int rf = proxy_connect(rh, rp);
+                proxy_cmd(rf, r, sizeof(r), 4, "CONFIG", "SET", "slowlog-max-len", v2);
+                close(rf);
+                break;
+            }
+            proxy_cmd(fd, r, sizeof(r), 3, "CONFIG", "GET", "slowlog-max-len");
+            CHECK(strcmp(r, "-ERR all responses not same") == 0, "CONFIG GET: a replica that differs is noticed", pass,
+                  fail);
+            proxy_cmd(fd, r, sizeof(r), 4, "CONFIG", "SET", "slowlog-max-len", orig);
+            same = nodes_with_value("slowlog-max-len", orig, &total);
+            CHECK(strcmp(r, "+OK") == 0 && same == total, "CONFIG SET: original value back on every node", pass, fail);
+        }
+    }
 
     /* a transaction is bound to one node, CONFIG to every primary */
     proxy_cmd(fd, r, sizeof(r), 1, "MULTI");

@@ -177,7 +177,8 @@ static int has_flag(const char *flags, const char *want) {
  * share this without either one touching live global state mid-parse.
  * out_slot must already be initialized (typically all -1) by the caller. */
 static void parse_cluster_nodes_into(const char *data, ClusterNode *out_nodes, int *out_count, int *out_slot,
-                                     int verbose) {
+                                     ReplicaNode *out_reps, int *out_rcount, int verbose) {
+    *out_rcount = 0;
     char buf[65536];
     snprintf(buf, sizeof(buf), "%s", data);
     char *p = buf;
@@ -214,6 +215,30 @@ static void parse_cluster_nodes_into(const char *data, ClusterNode *out_nodes, i
          * reachable. */
         int is_master = (strstr(flags, "master") != NULL);
         int is_failed = has_flag(flags, "fail");
+        /* A reachable replica is kept apart, for CONFIG GET/SET only (see
+         * handle_config_cmd() in fanout.c). */
+        int is_replica = has_flag(flags, "slave") || has_flag(flags, "replica");
+        if (is_replica && !is_failed && !has_flag(flags, "noaddr") && !has_flag(flags, "handshake") &&
+            *out_rcount < MAX_REPLICAS) {
+            char raddr[128];
+            snprintf(raddr, sizeof(raddr), "%s", addr);
+            char *rat = strchr(raddr, '@');
+            if (rat) *rat = '\0';
+            char *rcolon = strrchr(raddr, ':');
+            if (rcolon) {
+                *rcolon = '\0';
+                int rport = atoi(rcolon + 1);
+                if (raddr[0] && rport > 0) {
+                    ReplicaNode *r = &out_reps[(*out_rcount)++];
+                    snprintf(r->node.node_id, sizeof(r->node.node_id), "%.63s", id);
+                    snprintf(r->node.ip, sizeof(r->node.ip), "%.63s", raddr);
+                    snprintf(r->node.flags, sizeof(r->node.flags), "%.127s", flags);
+                    r->node.is_master = 0;
+                    r->node.port = rport;
+                    snprintf(r->master_id, sizeof(r->master_id), "%.63s", master);
+                }
+            }
+        }
         if (!is_master || is_failed) {
             if (verbose) printf("  skipping node %s %s (flags=%s)\n", id, addr, flags);
             if (eol) *eol = saved;
@@ -275,7 +300,8 @@ static void parse_cluster_nodes_into(const char *data, ClusterNode *out_nodes, i
  * call from the background refresh thread once the process is serving
  * traffic (unlike fetch_cluster_nodes() below, which is startup-only and
  * fatal on failure). */
-static int fetch_cluster_nodes_from(const char *ip, int port, ClusterNode *out_nodes, int *out_count, int *out_slot) {
+static int fetch_cluster_nodes_from(const char *ip, int port, ClusterNode *out_nodes, int *out_count, int *out_slot,
+                                    ReplicaNode *out_reps, int *out_rcount) {
     /* Short timeout, not tcp_connect()'s fixed 5s: this runs every refresh
      * cycle, and a cycle where every candidate source is down (the
      * last-good source, then each known node in turn) pays one timeout per
@@ -308,7 +334,7 @@ static int fetch_cluster_nodes_from(const char *ip, int port, ClusterNode *out_n
      * -- logging each one would spam the log with no new information.
      * reconcile_and_publish() already prints whenever something actually
      * changes, which is the signal worth surfacing here. */
-    parse_cluster_nodes_into(body, out_nodes, out_count, out_slot, /*verbose=*/0);
+    parse_cluster_nodes_into(body, out_nodes, out_count, out_slot, out_reps, out_rcount, /*verbose=*/0);
     free(resp);
     return 0;
 }
@@ -343,7 +369,9 @@ void fetch_cluster_nodes(void) {
      * feature existed. */
     g_node_count = 0;
     memset(g_slot_map, -1, sizeof(g_slot_map));
-    parse_cluster_nodes_into(body, g_nodes, &g_node_count, g_slot_map, /*verbose=*/1);
+    parse_cluster_nodes_into(body, g_nodes, &g_node_count, g_slot_map, g_replicas, &g_replica_count, /*verbose=*/1);
+    memset(g_replica_gen, 0, sizeof(g_replica_gen));
+    for (int i = 0; i < g_replica_count; i++) g_replica_alive[i] = 1;
     free(resp);
     memset(g_node_gen, 0, sizeof(g_node_gen));
     memset(g_node_has_slots, 0, sizeof(g_node_has_slots));
@@ -355,6 +383,10 @@ void fetch_cluster_nodes(void) {
     for (int i = 0; i < g_node_count; i++)
         printf("  [%d] %s:%d  flags=%-24s %s\n", i, g_nodes[i].ip, g_nodes[i].port, g_nodes[i].flags,
                g_nodes[i].is_master ? "(master)" : "(replica)");
+    printf("Discovered %d replica(s) (used by CONFIG GET/SET only):\n", g_replica_count);
+    for (int i = 0; i < g_replica_count; i++)
+        printf("  [r%d] %s:%d  replica of %.12s\n", i, g_replicas[i].node.ip, g_replicas[i].node.port,
+               g_replicas[i].master_id);
     printf("\n");
     probe_backend_versions(g_nodes, g_node_count, g_node_has_slots);
 }
@@ -414,7 +446,65 @@ void wake_all_workers(void) {
  *   - slots claimed by a node_id never seen before  -> brand new index
  *     (scenario 1)
  */
-static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const char *src_ip, int src_port) {
+/* Reconciles freshly discovered replicas (dr/drcount) against the published
+ * ones into reps/rgen/ralive/rcount: a node_id keeps its index; an address
+ * change, or coming back, bumps gen; one no longer listed (failed or
+ * removed) goes alive=0 with a gen bump; a new one is appended. Indices are
+ * never reused, like the masters'. Returns 1 if anything changed. */
+static int reconcile_replicas(const ReplicaNode *dr, int drcount, ReplicaNode *reps, int *rgen, int *ralive,
+                              int *rcount) {
+    pthread_rwlock_rdlock(&g_topology_lock);
+    memcpy(reps, g_replicas, sizeof(g_replicas));
+    memcpy(rgen, g_replica_gen, sizeof(g_replica_gen));
+    memcpy(ralive, g_replica_alive, sizeof(g_replica_alive));
+    *rcount = g_replica_count;
+    pthread_rwlock_unlock(&g_topology_lock);
+
+    int changed = 0, seen[MAX_REPLICAS] = {0};
+    for (int j = 0; j < drcount; j++) {
+        int idx = -1;
+        for (int i = 0; i < *rcount; i++)
+            if (!strcmp(reps[i].node.node_id, dr[j].node.node_id)) {
+                idx = i;
+                break;
+            }
+        if (idx < 0) {
+            if (*rcount >= MAX_REPLICAS) {
+                fprintf(stderr, "[topology] MAX_REPLICAS(%d) reached, ignoring replica %s:%d\n", MAX_REPLICAS,
+                        dr[j].node.ip, dr[j].node.port);
+                continue;
+            }
+            idx = (*rcount)++;
+            reps[idx] = dr[j];
+            rgen[idx] = 0;
+            ralive[idx] = 1;
+            changed = 1;
+            printf("[topology] replica [r%d] %s:%d   <-- NEW\n", idx, dr[j].node.ip, dr[j].node.port);
+        } else if (!ralive[idx] || strcmp(reps[idx].node.ip, dr[j].node.ip) || reps[idx].node.port != dr[j].node.port) {
+            printf("[topology] replica [r%d] %s:%d   <-- %s\n", idx, dr[j].node.ip, dr[j].node.port,
+                   ralive[idx] ? "ADDRESS CHANGED" : "BACK");
+            reps[idx] = dr[j];
+            rgen[idx]++;
+            ralive[idx] = 1;
+            changed = 1;
+        } else {
+            reps[idx] = dr[j]; /* master_id may have changed */
+        }
+        seen[idx] = 1;
+    }
+    for (int i = 0; i < *rcount; i++)
+        if (ralive[i] && !seen[i]) {
+            printf("[topology] replica [r%d] %s:%d   <-- GONE (failed or no longer a replica)\n", i, reps[i].node.ip,
+                   reps[i].node.port);
+            ralive[i] = 0;
+            rgen[i]++;
+            changed = 1;
+        }
+    return changed;
+}
+
+static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const ReplicaNode *dr, int drcount,
+                                  const char *src_ip, int src_port) {
     time_t now = time(NULL);
 
     ClusterNode nodes[MAX_NODES];
@@ -537,7 +627,23 @@ static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const
             }
     if (!changed) changed = (memcmp(old_slot, slot, sizeof(slot)) != 0);
 
-    if (!changed) return;
+    static ReplicaNode reps[MAX_REPLICAS];
+    int rgen[MAX_REPLICAS], ralive[MAX_REPLICAS], rcount;
+    int rchanged = reconcile_replicas(dr, drcount, reps, rgen, ralive, &rcount);
+
+    if (!changed && !rchanged) return;
+    if (!changed) {
+        /* Only the replicas changed: publish just those. */
+        pthread_rwlock_wrlock(&g_topology_lock);
+        memcpy(g_replicas, reps, sizeof(g_replicas));
+        memcpy(g_replica_gen, rgen, sizeof(g_replica_gen));
+        memcpy(g_replica_alive, ralive, sizeof(g_replica_alive));
+        g_replica_count = rcount;
+        pthread_rwlock_unlock(&g_topology_lock);
+        atomic_fetch_add_explicit(&g_topology_version, 1, memory_order_release);
+        wake_all_workers();
+        return;
+    }
 
     /* Only printed when the master set/topology actually changed this
      * round, with whatever's new/updated called out. */
@@ -551,6 +657,10 @@ static void reconcile_and_publish(ClusterNode *dn, int dcount, int *dslot, const
     memcpy(g_node_has_slots, has_slots, sizeof(g_node_has_slots));
     memcpy(g_slot_map, slot, sizeof(g_slot_map));
     g_node_count = count;
+    memcpy(g_replicas, reps, sizeof(g_replicas));
+    memcpy(g_replica_gen, rgen, sizeof(g_replica_gen));
+    memcpy(g_replica_alive, ralive, sizeof(g_replica_alive));
+    g_replica_count = rcount;
     pthread_rwlock_unlock(&g_topology_lock);
     atomic_fetch_add_explicit(&g_topology_version, 1, memory_order_release);
     wake_all_workers();
@@ -577,8 +687,9 @@ static void *topology_refresh_loop(void *arg) {
         if (paused) continue;
 
         ClusterNode dn[MAX_NODES];
-        int dcount = 0, dslot[CLUSTER_SLOTS];
-        int ok = fetch_cluster_nodes_from(last_ip, last_port, dn, &dcount, dslot);
+        static ReplicaNode dr[MAX_REPLICAS];
+        int dcount = 0, dslot[CLUSTER_SLOTS], drcount = 0;
+        int ok = fetch_cluster_nodes_from(last_ip, last_port, dn, &dcount, dslot, dr, &drcount);
         if (ok < 0) {
             /* Last source unreachable: fall back to any node we already know about,
              * so a permanently-down seed doesn't stall refresh forever. */
@@ -590,7 +701,7 @@ static void *topology_refresh_loop(void *arg) {
             pthread_rwlock_unlock(&g_topology_lock);
             for (int i = 0; i < fcount && ok < 0; i++) {
                 if (fallback[i].port == last_port && strcmp(fallback[i].ip, last_ip) == 0) continue;
-                ok = fetch_cluster_nodes_from(fallback[i].ip, fallback[i].port, dn, &dcount, dslot);
+                ok = fetch_cluster_nodes_from(fallback[i].ip, fallback[i].port, dn, &dcount, dslot, dr, &drcount);
                 if (ok == 0 && dcount > 0) {
                     snprintf(last_ip, sizeof(last_ip), "%s", fallback[i].ip);
                     last_port = fallback[i].port;
@@ -610,7 +721,7 @@ static void *topology_refresh_loop(void *arg) {
                     last_ip, last_port);
             continue;
         }
-        reconcile_and_publish(dn, dcount, dslot, last_ip, last_port);
+        reconcile_and_publish(dn, dcount, dslot, dr, drcount, last_ip, last_port);
     }
     return NULL;
 }

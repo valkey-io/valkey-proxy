@@ -383,6 +383,8 @@ extern const char *g_test_acl_noadmin_user, *g_test_acl_noadmin_pass;
 extern const char *g_test_acl_cl_user, *g_test_acl_cl_pass;
 extern const char *g_test_acl_kill_user, *g_test_acl_kill_pass;
 void test_acl_fixture_kill_user(const char *user);
+int test_cluster_node_count(void);
+const char *test_cluster_node(int i, int *port, int *replica);
 
 #define SKIP(label) printf("  [SKIP] %s (needs --cluster=<host:port>)\n", (label))
 

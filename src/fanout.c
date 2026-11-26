@@ -631,16 +631,46 @@ bad:
     return -1;
 }
 
-static char *fanout_agg_config_get(FanoutCtx *ctx, int *out_len) {
+/* "-ERR CONFIG <sub> failed on <ip:port>" for a node that gave no reply
+ * (unreachable, connection lost), so the client knows which one. */
+static char *config_node_failed(Worker *w, const FanoutSub *s, const char *sub, int *out_len) {
+    const ClusterNode *n = s->replica ? &w->topo.replicas[s->node_idx].node : &w->topo.nodes[s->node_idx];
+    char buf[192];
+    int len = snprintf(buf, sizeof(buf), "-ERR CONFIG %s failed on %s %s:%d\r\n", sub,
+                       s->replica ? "replica" : "primary", n->ip, n->port);
+    if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
+    char *r = malloc((size_t)len);
+    if (!r) return NULL;
+    memcpy(r, buf, (size_t)len);
+    *out_len = len;
+    return r;
+}
+
+/* CONFIG SET: +OK only if every node (primaries and replicas) said so; else
+ * the first node's error as is, or which node gave no reply at all. */
+static char *fanout_agg_config_set(Worker *w, FanoutCtx *ctx, int *out_len) {
+    for (int i = 0; i < ctx->nsubs; i++) {
+        FanoutSub *s = &ctx->subs[i];
+        if (s->error || !s->rbuf || s->rbuf_len < 1) return config_node_failed(w, s, "SET", out_len);
+        if (s->rbuf[0] != '+') {
+            char *r = malloc((size_t)s->rbuf_len);
+            if (!r) return NULL;
+            memcpy(r, s->rbuf, (size_t)s->rbuf_len);
+            *out_len = s->rbuf_len;
+            return r;
+        }
+    }
+    char *r = strdup("+OK\r\n");
+    if (r) *out_len = 5;
+    return r;
+}
+
+static char *fanout_agg_config_get(Worker *w, FanoutCtx *ctx, int *out_len) {
     static const char not_same[] = "-ERR all responses not same\r\n";
-    static const char failed[] = "-ERR fan-out backend error\r\n";
     const char *err = NULL;
     for (int i = 0; i < ctx->nsubs; i++) {
         FanoutSub *s = &ctx->subs[i];
-        if (s->error || !s->rbuf || s->rbuf_len < 1) {
-            err = failed;
-            break;
-        }
+        if (s->error || !s->rbuf || s->rbuf_len < 1) return config_node_failed(w, s, "GET", out_len);
     }
     FanoutSub *first = &ctx->subs[0];
     if (!err && first->rbuf[0] == '-') {
@@ -1729,10 +1759,12 @@ void fanout_aggregate_and_reply(Worker *w, FanoutCtx *ctx) {
         resp = fanout_agg_slowlog_get(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "HOTKEYS_GET")) {
         resp = fanout_agg_hotkeys_get(ctx, &resp_len);
-    } else if (!strcmp(ctx->cmd, "RESET") || !strcmp(ctx->cmd, "CONFIG_SET")) {
+    } else if (!strcmp(ctx->cmd, "RESET")) {
         resp = fanout_agg_ok(ctx, &resp_len);
+    } else if (!strcmp(ctx->cmd, "CONFIG_SET")) {
+        resp = fanout_agg_config_set(w, ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "CONFIG_GET")) {
-        resp = fanout_agg_config_get(ctx, &resp_len);
+        resp = fanout_agg_config_get(w, ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "CHANNELS")) {
         resp = fanout_agg_pubsub_channels(ctx, &resp_len);
     } else if (!strcmp(ctx->cmd, "NUMPAT")) {
@@ -2478,6 +2510,8 @@ static void fanout_all_masters(Worker *w, ClientConn *client, FanoutCtx *ctx, co
     fanout_to_nodes(w, client, ctx, cmd_buf, cmd_len, target_nodes, ntargets);
 }
 
+/* target_nodes holds master indices, or -1 - i for replica i (CONFIG
+ * only, see fanout_config_targets()). */
 void fanout_to_nodes(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *cmd_buf, int cmd_len,
                      const int *target_nodes, int ntargets) {
     ctx->nsubs = ntargets;
@@ -2495,17 +2529,20 @@ void fanout_to_nodes(Worker *w, ClientConn *client, FanoutCtx *ctx, const char *
 
     for (int ti = 0; ti < ntargets; ti++) {
         int ni = target_nodes[ti];
+        int replica = ni < 0;
+        if (replica) ni = -1 - ni;
         FanoutSub *sub = &ctx->subs[ti];
         sub->ctx = ctx;
         sub->sub_idx = ti;
         sub->node_idx = ni;
+        sub->replica = replica;
         sub->rbuf = NULL;
         sub->rbuf_len = sub->rbuf_cap = 0;
         sub->done = 0;
         sub->error = 0;
         sub->conn = NULL;
 
-        ConnPool *pool = &grp->node_pools[ni].pools[POOL_NORMAL];
+        ConnPool *pool = replica ? &w->replica_pools[ni] : &grp->node_pools[ni].pools[POOL_NORMAL];
         PoolConn *conn = pool_acquire_nb(w, pool);
         if (!conn) {
             sub->error = 1;
@@ -2940,6 +2977,15 @@ void handle_hotkeys_cmd(Worker *w, ClientConn *client, int cmdlen) {
  * value: Valkey's CONFIG SET is all-or-nothing per node, not across them).
  * GET answers only if every node's reply is the same, see
  * fanout_agg_config_get(). The other subcommands stay unsupported. */
+/* CONFIG's targets: every master, then every live replica with a pool (as
+ * -1 - i, see fanout_to_nodes()). Returns the count. */
+static int fanout_config_targets(Worker *w, int *out) {
+    int n = topo_all_masters(w, out);
+    for (int i = 0; i < w->topo.replica_count && n < MAX_FANOUT_SUBS; i++)
+        if (w->topo.replica_alive[i] && w->replica_pool_gen[i]) out[n++] = -1 - i;
+    return n;
+}
+
 void handle_config_cmd(Worker *w, ClientConn *client, int cmdlen) {
     if (!__atomic_load_n(&g_config.config_command_enable, __ATOMIC_RELAXED)) {
         client_reject_error(w, client, "CONFIG is disabled on this proxy, see config-command-enable");
@@ -2965,7 +3011,9 @@ void handle_config_cmd(Worker *w, ClientConn *client, int cmdlen) {
     ctx->client = client;
     snprintf(ctx->cmd, sizeof(ctx->cmd), "%s", tag);
     client->fanout_ctx = ctx;
-    fanout_all_masters(w, client, ctx, client->hbuf, cmdlen);
+    int targets[MAX_FANOUT_SUBS];
+    int ntargets = fanout_config_targets(w, targets);
+    fanout_to_nodes(w, client, ctx, client->hbuf, cmdlen, targets, ntargets);
 }
 
 void handle_commandlog_cmd(Worker *w, ClientConn *client, int cmdlen) {

@@ -164,12 +164,36 @@ static int format_pool_totals(Worker *w, const DbTotals *dbs, int ndb, GrowBuf *
     return 0;
 }
 
+/* The replicas' pools (CONFIG GET/SET only, see worker_sync_topology()),
+ * summed across workers, one pool_replica<i>_normal line each. Each
+ * worker's replica_pools array is inline and never moves. */
+static int format_replica_pools(Worker *w, GrowBuf *g) {
+    for (int ri = 0; ri < w->topo.replica_count; ri++) {
+        PoolTotals t = {0};
+        for (int wi = 0; wi < g_config.worker_thread_no; wi++) {
+            Worker *ow = &g_workers[wi];
+            if (!atomic_load_explicit(&ow->stats_ready, memory_order_acquire)) continue;
+            pool_totals_add(&t, &ow->replica_pools[ri].stats, REPLICA_POOL_MAX);
+        }
+        if (!t.live) continue;
+        const ClusterNode *n = &w->topo.replicas[ri].node;
+        if (gb_append_fmt(g,
+                          "pool_replica%d_normal:addr=%s:%d,gen=%d,alive=%d,max=%lld,open=%lld,in_use=%lld,"
+                          "acquires=%llu,connects=%llu,connect_failures=%llu,reconnects=%llu,destroys=%llu\r\n",
+                          ri, n->ip, n->port, w->topo.replica_gen[ri], w->topo.replica_alive[ri], t.max, t.open,
+                          t.in_use, t.acquires, t.connects, t.connect_failures, t.reconnects, t.destroys) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 int proxy_pools_append(Worker *w, GrowBuf *g) {
     DbTotals *dbs;
     int ndb;
     if (collect_pool_totals(&dbs, &ndb) < 0) return -1;
     int rc = format_pool_totals(w, dbs, ndb, g);
     free(dbs);
+    if (rc == 0) rc = format_replica_pools(w, g);
     return rc;
 }
 
