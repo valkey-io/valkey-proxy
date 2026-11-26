@@ -1,0 +1,17 @@
+# Configures the "What's Changed" notes GitHub generates for each release
+# (see .github/workflows/release.yml).
+changelog:
+  exclude:
+    authors:
+      - dependabot
+      - github-actions
+  categories:
+    - title: Features
+      labels:
+        - enhancement
+    - title: Bug Fixes
+      labels:
+        - bug
+    - title: Other Changes
+      labels:
+        - "*"
